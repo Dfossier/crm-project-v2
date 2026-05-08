@@ -13,7 +13,19 @@ from html.parser import HTMLParser
 
 DB_PATH = "/home/dfoss/crm/database/louisiana_foundations.db"
 import os
+from pathlib import Path
+
+DB_PATH = "/home/dfoss/crm/database/louisiana_foundations.db"
+
+# Load API key from environment or .env file
 API_KEY = os.getenv("SERPER_API_KEY")
+if not API_KEY:
+    env_file = Path(__file__).parent / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().strip().split("\n"):
+            if line.startswith("SERPER_API_KEY="):
+                API_KEY = line.split("=", 1)[1].strip()
+                break
 LOG_PATH = "/home/dfoss/crm/foundation_scraper_log.json"
 DELAY = 0.75
 
