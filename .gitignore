@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+.eggs/
+dist/
+build/
+*.egg-info/
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Database
+database/*.db
+database/*.db-journal
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Test files
+test_*.json
+test_*.txt
+*.bak*
+
+# Generated files
+*.json
+*.md
+
+# Environment files
+.env
+.env.local

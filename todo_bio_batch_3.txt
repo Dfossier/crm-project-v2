@@ -1,0 +1,11 @@
+[X] 1. Lake Charles Charter Academy (9 personnel) - extracted 5 bios
+[X] 2. Louisiana Bar Foundation (0 personnel) - skip
+[X] 3. Louisiana National Guard Foundation (9 personnel) - extracted 7 bios
+[X] 4. LSU Health Foundation New Orleans (0 personnel) - skip
+[X] 5. LSU Health Sciences Foundation Shreveport (25 personnel) - extracted 4 bios
+[ ] 6. LSU Real Estate Foundation (11 personnel) - no bio data found
+[X] 7. Jazz Heritage Foundation (0 personnel) - skip
+[X] 8. Pelican Educational Foundation (8 personnel) - extracted 2 bios
+[X] 9. Phi Kappa Phi Foundation (4 personnel) - extracted 4 bios
+[X] 10. Road Home Corporation (0 personnel) - skip
+[X] Save results to foundation_bio_batch_3_results.json - 23 records written
