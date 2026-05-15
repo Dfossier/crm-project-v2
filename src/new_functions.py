@@ -1,6 +1,7 @@
 import re
 import streamlit as st
 import pandas as pd
+from src.bio_scraper import is_good_bio
 
 
 def show_followups(crm):
@@ -203,7 +204,7 @@ def show_centers_of_influence(crm):
             # Strip scraper source tag: "[fnd:example.org] actual bio text"
             bio_clean = re.sub(r"^\[.*?\]\s*", "", str(bio_raw)).strip() if bio_raw else ""
 
-            has_bio = bool(bio_clean)
+            has_bio = bool(bio_clean) and is_good_bio(bio_clean, row.name)
             label   = f"{'✅' if has_bio else '❌'} {row.name}"
             if row.title:
                 label += f" — {row.title}"
@@ -231,7 +232,7 @@ def show_centers_of_influence(crm):
 
                 # Bio
                 st.markdown("---")
-                if bio_clean:
+                if bio_clean and is_good_bio(bio_clean, row.name):
                     st.markdown("**Bio**")
                     st.write(bio_clean)
                     source_match = re.match(r"^\[(.*?)\]", str(bio_raw))

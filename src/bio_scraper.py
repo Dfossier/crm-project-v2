@@ -117,7 +117,8 @@ def serper(query: str, num: int = 5) -> list:
 # Hard disqualifiers
 _NOT_BIO = re.compile(
     r"(login|sign.?in|404|not.?found|subscribe|cookie|privacy policy|"
-    r"terms of service|javascript|enable js|\bcart\b|\bcheckout\b)",
+    r"terms of service|javascript|enable js|\bcart\b|\bcheckout\b|"
+    r"show search box|select the type of search|nonprofit explorer)",
     re.IGNORECASE,
 )
 _PHONE = re.compile(r"\d{3}[-.\s]?\d{3}[-.\s]?\d{4}")
@@ -139,6 +140,8 @@ _SOCIAL_META = re.compile(
 
 # Salary/compensation data from 990 filings
 _SALARY_DATA = re.compile(r"\$[\d,]{4,}")
+# 990 compensation-table row: "(Title), $0, $0"
+_990_TABLE = re.compile(r"\([\w\s]{3,40}\),\s*\$\d", re.IGNORECASE)
 
 # Meeting-minutes patterns — person mentioned but not bio'd
 _MINUTES = re.compile(
@@ -160,6 +163,8 @@ _BIO_WORDS = re.compile(
 def is_good_bio(text: str, person_name: str, min_len: int = 45) -> bool:
     if not text or len(text) < min_len:
         return False
+    if text.startswith("...") or text.startswith("…"):
+        return False  # mid-snippet, truncated at start
     if _NOT_BIO.search(text):
         return False
     if _LINKEDIN_META.search(text):
@@ -168,6 +173,8 @@ def is_good_bio(text: str, person_name: str, min_len: int = 45) -> bool:
         return False   # social media profile stats, not a bio
     if _SALARY_DATA.search(text) and len(text) < 300:
         return False   # 990 comp table row, not a bio
+    if _990_TABLE.search(text):
+        return False   # 990 compensation table row
     if _MINUTES.search(text):
         return False
     # Pure contact info
