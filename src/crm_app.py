@@ -14,7 +14,6 @@ import os
 import io
 from pathlib import Path
 from src.new_functions import show_followups, show_compliance, show_centers_of_influence
-from src.profile_editor import show_personnel_profiles
 
 def create_link_column(df, url_col, text, tooltip):
     """Create a column with clickable links."""
@@ -50,7 +49,6 @@ class FoundationCRM:
                 SELECT 
                     f.id, f.ein, f.name, f.city, f.state, f.zip_code,
                     f.website, f.phone, f.email,
-                    f.board_url, f.about_url,
                     f.board_url, f.about_url,
                     f.investment_assets, f.annual_grants, f.annual_revenue,
                     f.filing_year, f.tax_exempt_status, f.is_active,
@@ -243,7 +241,7 @@ def main():
     st.sidebar.title("🏛️ Louisiana Foundations CRM")
     page = st.sidebar.selectbox(
         "Navigate",
-        ["Dashboard", "Foundation Directory", "Foundation Details", "Follow-ups", "Compliance", "Centers of Influence", "Personnel Profiles", "Add Interaction", "Data Management"]
+        ["Dashboard", "Foundation Directory", "Foundation Details", "Follow-ups", "Compliance", "Centers of Influence", "Add Interaction", "Data Management"]
     )
     
     if page == "Dashboard":
@@ -257,9 +255,6 @@ def main():
     elif page == "Compliance":
         show_compliance(crm)
     elif page == "Centers of Influence":
-        show_centers_of_influence(crm)
-    elif page == "Personnel Profiles":
-        show_personnel_profiles(crm)
         show_centers_of_influence(crm)
     elif page == "Add Interaction":
         show_add_interaction(crm)
