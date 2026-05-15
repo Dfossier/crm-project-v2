@@ -165,6 +165,8 @@ def is_good_bio(text: str, person_name: str, min_len: int = 45) -> bool:
         return False
     if text.startswith("...") or text.startswith("…"):
         return False  # mid-snippet, truncated at start
+    if text.rstrip().endswith("...") or text.rstrip().endswith("…"):
+        return False  # Google snippet truncated at end
     if _NOT_BIO.search(text):
         return False
     if _LINKEDIN_META.search(text):
