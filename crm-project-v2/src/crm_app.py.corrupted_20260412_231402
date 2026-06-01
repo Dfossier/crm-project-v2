@@ -1,0 +1,500 @@
+#!/usr/bin/env python3
+"""
+    Louisiana Foundations CRM Web Interface
+
+    A Streamlit-based CRM system for managing foundation relationships and data.
+"""
+
+import streamlit as st
+import pandas as pd
+import sqlite3
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, date
+import os
+import io
+from pathlib import Path
+
+# Page configuration
+st.set_page_config(
+    page_title="Louisiana Foundations CRM",
+    page_icon="🏛️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+    )
+
+class FoundationCRM:
+    def __init__(self):
+    self.base_dir = Path(__file__).parent.parent
+    self.db_path = self.base_dir / "database" / "louisiana_foundations.db"
+
+    def get_connection(self):
+"""Get database connection."""
+    return sqlite3.connect(self.db_path)
+
+    def load_foundations(self, filters=None):
+"""Load foundations data with optional filters."""
+    with self.get_connection() as conn:
+    query = """
+    SELECT
+    f.id, f.ein, f.name, f.city, f.state, f.zip_code,
+    f.website, f.phone, f.email,
+    f.investment_assets, f.annual_grants, f.annual_revenue,
+    f.filing_year, f.tax_exempt_status, f.is_active,
+    f.created_at, f.updated_at
+    FROM foundations f
+    WHERE 1=1
+"""
+    params = []
+
+    if filters:
+    if filters.get('min_assets'):
+    query += " AND f.investment_assets >= ?"
+    params.append(filters['min_assets'])
+
+    if filters.get('max_assets'):
+    query += " AND f.investment_assets <= ?"
+    params.append(filters['max_assets'])
+
+    if filters.get('city'):
+    query += " AND f.city LIKE ?"
+    params.append(f"%{filters['city']}%")
+
+    if filters.get('name_search'):
+    query += " AND f.name LIKE ?"
+    params.append(f"%{filters['name_search']}%")
+
+    query += " ORDER BY f.investment_assets DESC"
+
+    df = pd.read_sql_query(query, conn, params=params)
+    return df
+
+    def load_foundation_details(self, foundation_id):
+"""Load detailed information for a specific foundation."""
+    with self.get_connection() as conn:
+# Basic foundation info
+    foundation_query = """
+    SELECT * FROM foundations WHERE id = ?
+"""
+    foundation_df = pd.read_sql_query(foundation_query, conn, params=[foundation_id])
+
+# Personnel
+    personnel_query = """
+    SELECT * FROM personnel WHERE foundation_id = ? AND is_current = 1
+    ORDER BY title, name
+"""
+    personnel_df = pd.read_sql_query(personnel_query, conn, params=[foundation_id])
+
+# Focus areas
+    focus_query = """
+    SELECT * FROM focus_areas WHERE foundation_id = ?
+    ORDER BY is_primary DESC, category
+"""
+    focus_df = pd.read_sql_query(focus_query, conn, params=[foundation_id])
+
+# Recent interactions
+    interactions_query = """
+    SELECT * FROM interactions WHERE foundation_id = ?
+    ORDER BY interaction_date DESC LIMIT 10
+"""
+    interactions_df = pd.read_sql_query(interactions_query, conn, params=[foundation_id])
+
+# Investment advisors (legacy table)
+    advisor_query = """
+    SELECT * FROM investment_advisors WHERE foundation_id = ?
+    ORDER BY annual_fee DESC
+"""
+    try:
+    advisors_df = pd.read_sql_query(advisor_query, conn, params=[foundation_id])
+    except:
+    advisors_df = pd.DataFrame()
+
+# Detailed 990 personnel data
+    personnel_990_query = """
+    SELECT * FROM personnel_990 WHERE foundation_id = ?
+    ORDER BY
+    CASE
+    WHEN is_president = 1 OR is_ceo = 1 THEN 1
+    WHEN is_cfo = 1 THEN 2
+    WHEN is_vice_president = 1 THEN 3
+    WHEN is_secretary = 1 THEN 4
+    WHEN is_990_filer = 1 THEN 5
+    WHEN is_officer = 1 THEN 6
+    ELSE 7
+    END,
+    compensation DESC
+"""
+    try:
+    personnel_990_df = pd.read_sql_query(personnel_990_query, conn, params=[foundation_id])
+    except:
+    personnel_990_df = pd.DataFrame()
+
+# Investment details
+    investment_details_query = """
+    SELECT * FROM investment_details WHERE foundation_id = ?
+    ORDER BY filing_year DESC LIMIT 1
+"""
+    try:
+    investment_details_df = pd.read_sql_query(investment_details_query, conn, params=[foundation_id])
+    except:
+    investment_details_df = pd.DataFrame()
+
+# Consultants and professional services
+    consultants_query = """
+    SELECT * FROM consultants_990 WHERE foundation_id = ?
+    ORDER BY amount_paid DESC
+"""
+    try:
+    consultants_df = pd.read_sql_query(consultants_query, conn, params=[foundation_id])
+    except:
+    consultants_df = pd.DataFrame()
+
+    return {
+    'foundation': foundation_df.iloc[0] if len(foundation_df) > 0 else None,
+    'personnel': personnel_df,
+    'focus_areas': focus_df,
+    'interactions': interactions_df,
+    'investment_advisors': advisors_df,
+    'personnel_990': personnel_990_df,
+    'investment_details': investment_details_df,
+    'consultants': consultants_df
+    }
+
+    def add_interaction(self, foundation_id, interaction_type, contact_person,
+    subject, notes, follow_up_date=None):
+"""Add a new interaction record."""
+    with self.get_connection() as conn:
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO interactions
+    (foundation_id, interaction_type, contact_person, subject, notes, follow_up_date, created_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+""", (foundation_id, interaction_type, contact_person, subject, notes,
+    follow_up_date, "CRM User"))
+    conn.commit()
+
+    def get_summary_stats(self):
+"""Get summary statistics for dashboard."""
+    with self.get_connection() as conn:
+    stats = {}
+
+# Consolidated query for foundation counts and totals
+    summary_query = """
+    SELECT
+    COUNT(*) as total_foundations,
+    COALESCE(SUM(investment_assets), 0) as total_assets,
+    COALESCE(SUM(annual_grants), 0) as total_grants
+    FROM foundations
+"""
+    summary = pd.read_sql_query(summary_query, conn).iloc[0]
+    stats['total_foundations'] = summary['total_foundations']
+    stats['total_assets'] = summary['total_assets']
+    stats['total_grants'] = summary['total_grants']
+
+# Assets by city
+    stats['assets_by_city'] = pd.read_sql_query("""
+    SELECT city, SUM(investment_assets) as total_assets, COUNT(*) as foundation_count
+    FROM foundations
+    WHERE city IS NOT NULL
+    GROUP BY city
+    ORDER BY total_assets DESC
+    LIMIT 10
+""", conn)
+
+# Asset distribution
+    stats['asset_ranges'] = pd.read_sql_query("""
+    SELECT
+    CASE
+    WHEN investment_assets < 5000000 THEN '$2M - $5M'
+    WHEN investment_assets < 10000000 THEN '$5M - $10M'
+    WHEN investment_assets < 25000000 THEN '$10M - $25M'
+    WHEN investment_assets < 50000000 THEN '$25M - $50M'
+    WHEN investment_assets < 100000000 THEN '$50M - $100M'
+    ELSE '$100M+'
+    END as asset_range,
+    COUNT(*) as count,
+    SUM(investment_assets) as total_assets
+    FROM foundations
+    GROUP BY asset_range
+    ORDER BY MIN(investment_assets)
+""", conn)
+
+    return stats
+
+
+def main():
+    crm = FoundationCRM()
+
+# Session state init
+    if 'page' not in st.session_state:
+st.session_state.page = 'Dashboard'
+    if 'selected_foundation' not in st.session_state:
+st.session_state.selected_foundation = None
+
+# Sidebar navigation
+st.sidebar.title("🏛️ Louisiana Foundations CRM")
+    pages = ["Dashboard", "Contractor", "Center of Influence", "Foundation Directory", "Foundation Details", "Add Interaction", "Data Management"]
+    page_idx = pages.index(st.session_state.page) if st.session_state.page in pages else 0
+    page = st.sidebar.selectbox("Navigate", pages, index=page_idx, key='nav_select')
+st.session_state.page = page
+
+    if page == "Dashboard":
+    show_dashboard(crm)
+    elif page == "Contractor":
+    show_contractor_page(crm)
+    elif page == "Center of Influence":
+    show_center_of_influence_page(crm)
+    elif page == "Foundation Directory":
+    show_foundation_directory(crm)
+    elif page == "Foundation Details":
+    show_foundation_details(crm)
+    elif page == "Add Interaction":
+    show_add_interaction(crm)
+    elif page == "Data Management":
+    show_data_management(crm)
+
+def show_dashboard(crm):
+"""Display the main dashboard with summary statistics."""
+st.title("📊 Dashboard")
+st.markdown("### Louisiana Foundations Overview")
+
+    try:
+    stats = crm.get_summary_stats()
+
+# Key metrics
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+st.metric(
+    "Total Foundations",
+    f"{stats['total_foundations']:,}",
+    help="Foundations with >$2M in investment assets"
+    )
+
+    with col2:
+    if stats['total_assets']:
+st.metric(
+    "Total Assets",
+    f"${stats['total_assets']/1e9:.1f}B",
+    help="Combined investment assets of all foundations"
+    )
+    else:
+st.metric("Total Assets", "No data")
+
+    with col3:
+    if stats['total_grants']:
+st.metric(
+    "Annual Grants",
+    f"${stats['total_grants']/1e6:.1f}M",
+    help="Total annual grant distributions"
+    )
+    else:
+st.metric("Annual Grants", "No data")
+
+    with col4:
+    if stats['total_assets'] and stats['total_grants'] and stats['total_assets'] > 0:
+    payout_rate = (stats['total_grants'] / stats['total_assets']) * 100
+st.metric(
+    "Avg Payout Rate",
+    f"{payout_rate:.1f}%",
+    help="Annual grants as % of total assets"
+    )
+    else:
+st.metric("Avg Payout Rate", "No data")
+
+# Charts
+    if len(stats['assets_by_city']) > 0:
+    col1, col2 = st.columns(2)
+
+    with col1:
+st.subheader("Assets by City")
+    fig = px.bar(
+    stats['assets_by_city'],
+    x='city',
+    y='total_assets',
+    title="Investment Assets by City"
+    )
+    fig.update_yaxes(title="Total Assets ($)")
+    fig.update_layout(xaxis_tickangle=-45)
+st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+st.subheader("Foundation Count by City")
+    fig = px.bar(
+    stats['assets_by_city'],
+    x='city',
+    y='foundation_count',
+    title="Number of Foundations by City"
+    )
+    fig.update_yaxes(title="Number of Foundations")
+    fig.update_layout(xaxis_tickangle=-45)
+st.plotly_chart(fig, use_container_width=True)
+
+    if len(stats['asset_ranges']) > 0:
+st.subheader("Asset Size Distribution")
+    fig = px.pie(
+    stats['asset_ranges'],
+    values='count',
+    names='asset_range',
+    title="Foundations by Asset Range"
+    )
+st.plotly_chart(fig, use_container_width=True)
+
+    except Exception as e:
+st.error(f"Error loading dashboard data: {e}")
+st.info("💡 Try running the data acquisition script first to populate the database.")
+
+
+def show_contractor_page(crm):
+"""Display contractor/consultant information from 990 filings."""
+st.title("Contractor Management")
+
+    try:
+    with crm.get_connection() as conn:
+    contractors = pd.read_sql_query("""
+    SELECT c.name, c.service_type, c.amount_paid, c.description,
+    c.filing_year, c.is_investment_advisor,
+    c.assets_under_management, c.fee_percentage,
+    f.name AS foundation_name, f.city, f.state
+    FROM consultants_990 c
+    LEFT JOIN foundations f ON c.foundation_id = f.id
+    ORDER BY c.amount_paid DESC
+""", conn)
+
+    if len(contractors) == 0:
+st.info("No contractor data available. Run data acquisition first.")
+    return
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+st.metric("Total Entries", len(contractors))
+    with col2:
+st.metric("Unique Firms", contractors["name"].nunique())
+    with col3:
+    total_paid = contractors["amount_paid"].fillna(0).sum()
+st.metric("Total Paid", f"${total_paid:,.0f}")
+
+st.subheader("Filter")
+    col_a, col_b = st.columns(2)
+    with col_a:
+    search_query = st.text_input("Search by name or description", placeholder="Enter search term...")
+    with col_b:
+    service_types = ["All"] + sorted(contractors["service_type"].dropna().unique().tolist())
+    selected_type = st.selectbox("Service Type", service_types)
+
+    filtered = contractors.copy()
+    if search_query:
+    filtered = filtered[
+
+    filtered["description"].str.contains(search_query, case=False, na=False)
+    ]
+    if selected_type != "All":
+    filtered = filtered[filtered["service_type"] == selected_type]
+
+st.dataframe(filtered[["name", "service_type", "amount_paid", "foundation_name", "city", "state", "filing_year"]].rename(columns={
+    "name": "Contractor",
+    "service_type": "Service Type",
+    "amount_paid": "Amount Paid ($)",
+    "foundation_name": "Foundation",
+    "city": "City",
+    "state": "State",
+    "filing_year": "Year"
+    }))
+
+    if len(filtered) > 0:
+    options = [f"{r['name']} - {r['foundation_name']} ({r['filing_year']})" for _, r in filtered.iterrows()]
+    selected = st.selectbox("Select Contractor for Details", options)
+    if selected:
+    row = filtered.iloc[options.index(selected)]
+st.subheader("Contractor Details")
+st.write(f"**Name**: {row['name']}")
+st.write(f"**Service Type**: {row['service_type'].replace('_', ' ').title() if row['service_type'] else 'N/A'}")
+st.write(f"**Description**: {row['description'] or 'N/A'}")
+    if pd.notna(row['amount_paid']):
+st.write(f"**Amount Paid**: {row['amount_paid']:,.0f}")
+st.write(f"**Foundation**: {row['foundation_name']} ({row['city']}, {row['state']})")
+st.write(f"**Filing Year**: {row['filing_year']}")
+    if row['is_investment_advisor']:
+    if pd.notna(row['assets_under_management']):
+st.write(f"**Assets Under Management**: {row['assets_under_management']:,.0f}")
+    if pd.notna(row['fee_percentage']) and row['fee_percentage']:
+st.write(f"**Fee**: {row['fee_percentage']:.3f}%")
+
+    except Exception as e:
+st.error(f"Error loading contractor data: {e}")
+
+
+def show_center_of_influence_page(crm):
+"""Display Center of Influence (COI) -- officers and trustees from 990 filings."""
+st.title("Center of Influence Management")
+
+    try:
+    with crm.get_connection() as conn:
+    cois = pd.read_sql_query("""
+    SELECT p.name, p.title, p.role_type, p.is_officer, p.is_director,
+    p.is_trustee, p.is_key_employee, p.hours_per_week,
+    p.compensation, p.benefits, p.filing_year,
+    p.is_president, p.is_vice_president, p.is_secretary,
+    p.is_treasurer, p.is_cfo, p.is_ceo, p.is_chair,
+    f.name AS foundation_name, f.city, f.state
+    FROM personnel_990 p
+    LEFT JOIN foundations f ON p.foundation_id = f.id
+    ORDER BY p.compensation DESC
+""", conn)
+
+    if len(cois) == 0:
+st.info("No personnel data available. Run data acquisition first.")
+    return
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+st.metric("Total People", len(cois))
+    with col2:
+st.metric("Officers", int(cois["is_officer"].sum()))
+    with col3:
+    total_comp = cois["compensation"].fillna(0).sum()
+st.metric("Total Compensation", f"${total_comp:,.0f}")
+
+st.subheader("Filter")
+    col_a, col_b = st.columns(2)
+    with col_a:
+    search_query = st.text_input("Search by name or title", placeholder="Enter search term...")
+    with col_b:
+    selected_role = st.selectbox("Role Type", ["All", "officer", "trustee"])
+
+    filtered = cois.copy()
+    if search_query:
+    filtered = filtered[
+
+    filtered["title"].str.contains(search_query, case=False, na=False)
+    ]
+    if selected_role != "All":
+    filtered = filtered[filtered["role_type"] == selected_role]
+
+st.dataframe(filtered[["name", "title", "role_type", "compensation", "foundation_name", "city", "state", "filing_year"]].rename(columns={
+    "name": "Name",
+    "title": "Title",
+    "role_type": "Role",
+    "compensation": "Compensation ($)",
+    "foundation_name": "Foundation",
+    "city": "City",
+    "state": "State",
+    "filing_year": "Year"
+    }))
+
+    if len(filtered) > 0:
+    options = [f"{r['name']} - {r['foundation_name']} ({r['filing_year']})" for _, r in filtered.iterrows()]
+    selected = st.selectbox("Select Person for Details", options)
+    if selected:
+    row = filtered.iloc[options.index(selected)]
+st.subheader("COI Details")
+st.write(f"**Name**: {row['name']}")
+st.write(f"**Title**: {row['title'] or 'N/A'}")
+st.write(f"**Foundation**: {row['foundation_name']} ({row['city']}, {row['state']})")
+st.write(f"**Role**: {row['role_type'].title() if row['role_type'] else 'N/A'}")
+st.write(f"**Hours/Week**: {row['hours_per_week'] or 'N/A'}")
+    comp = row["compensation"] if pd.notna(row["compensation"]) else 0
+    benefits = row["benefits"] if pd.notna(row["benefits"]) else 0
+    **Total**: {comp+benefits:,.0f}")
+    roles = []
+    for flag, label in [
