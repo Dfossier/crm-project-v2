@@ -448,7 +448,7 @@ def _render_holdings_charts(holdings: pd.DataFrame):
     st.plotly_chart(fig2, use_container_width=True)
 
 
-def _import_from_form5500(crm, foundation_id: int, pdf_url: str) -> int:
+def _import_from_form5500(crm, foundation_id: int, pdf_url: str, start_page: int = None) -> int:
     """Parse Schedule of Assets from a Form 5500 PDF and bulk-insert holdings. Returns count inserted."""
     import io, re
     try:
@@ -470,19 +470,42 @@ def _import_from_form5500(crm, foundation_id: int, pdf_url: str) -> int:
             return 'Balanced'
         return 'Equities'
 
-    raw_url = pdf_url.split('#')[0]
-    resp = requests.get(raw_url, timeout=60)
-    if resp.status_code != 200:
-        return 0
-    reader = pypdf.PdfReader(io.BytesIO(resp.content))
+    import os
+    from urllib.parse import unquote
+    path = pdf_url.strip().strip('"').strip("'")
+    if path.startswith("file:///"):
+        path = unquote(path[8:]).replace("/", os.sep)
+    elif path.startswith("file://"):
+        path = unquote(path[7:])
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            reader = pypdf.PdfReader(io.BytesIO(f.read()))
+    else:
+        raw_url = path.split('#')[0]
+        resp = requests.get(raw_url, timeout=60)
+        if resp.status_code != 200:
+            return 0
+        reader = pypdf.PdfReader(io.BytesIO(resp.content))
 
     # Find the Schedule of Assets page
     asset_text = None
-    for page in reader.pages:
-        t = page.extract_text() or ''
-        if 'Schedule of Assets' in t and 'End of Year' in t:
-            asset_text = t
-            break
+    if start_page is not None:
+        # User-specified page (1-indexed)
+        pages_to_search = list(range(start_page - 1, min(start_page + 9, len(reader.pages))))
+    else:
+        pages_to_search = range(len(reader.pages))
+
+    for i in pages_to_search:
+        t = reader.pages[i].extract_text() or ''
+        if start_page is not None:
+            # Accept any page when user specifies start; stop at first page with dollar values
+            if re.search(r'\d[\d,]+', t):
+                asset_text = (asset_text or '') + '\n' + t
+        else:
+            if 'Schedule of Assets' in t and 'End of Year' in t:
+                asset_text = t
+                break
+
     if not asset_text:
         return 0
 
@@ -737,12 +760,41 @@ def show_aggregate_view(filing: dict, total_assets: float, frow, year):
 # ── 401k portfolio returns chart (yfinance) ──────────────────────────────────
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _fetch_weighted_annual_returns(ticker_weight_pairs: tuple) -> pd.Series:
-    """Fetch adjusted-close prices for each ticker, compute annual returns, weight by allocation."""
+def _fetch_benchmark_returns(equity_wt: float = 0.70, bond_wt: float = 0.30) -> pd.Series:
+    """70/30 benchmark: SPY (equities) + AGG (bonds), annually rebalanced."""
     try:
         import yfinance as yf
     except ImportError:
         return pd.Series(dtype=float)
+    try:
+        raw = yf.download(["SPY", "AGG"], period="10y", interval="1mo",
+                          progress=False, auto_adjust=True, actions=False)
+        prices = raw["Close"] if "Close" in raw.columns else raw
+        annual = prices.resample("YE").last()
+        ret    = annual.pct_change().dropna(how="all")
+        benchmark = pd.Series(0.0, index=ret.index)
+        if "SPY" in ret.columns:
+            benchmark = benchmark.add(ret["SPY"] * equity_wt, fill_value=0)
+        if "AGG" in ret.columns:
+            benchmark = benchmark.add(ret["AGG"] * bond_wt, fill_value=0)
+        benchmark.index = benchmark.index.year
+        return (benchmark * 100).round(2)
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _fetch_return_data(ticker_weight_pairs: tuple) -> dict:
+    """
+    Returns dict with:
+      portfolio_annual  – pd.Series  (year → weighted annual return %)
+      holding_annualized – dict      (ticker → 10yr CAGR %)
+      cumulative         – pd.Series (year → $10k grown)
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        return {}
 
     tickers = [t for t, _ in ticker_weight_pairs]
     weights = {t: w for t, w in ticker_weight_pairs}
@@ -754,82 +806,210 @@ def _fetch_weighted_annual_returns(ticker_weight_pairs: tuple) -> pd.Series:
         if isinstance(prices, pd.Series):
             prices = prices.to_frame(tickers[0])
     except Exception:
-        return pd.Series(dtype=float)
+        return {}
 
-    annual = prices.resample("YE").last()
-    ret    = annual.pct_change().dropna(how="all")
+    annual  = prices.resample("YE").last()
+    ret     = annual.pct_change().dropna(how="all")
 
-    portfolio = pd.Series(0.0, index=ret.index)
+    # ── Portfolio weighted annual returns ──
+    portfolio      = pd.Series(0.0, index=ret.index)
     covered_weight = 0.0
     for ticker in tickers:
         if ticker in ret.columns:
-            col = ret[ticker].dropna()
-            w   = weights[ticker]
-            portfolio = portfolio.add(col * w, fill_value=0)
-            covered_weight += w
-
-    # Scale up by covered weight so missing tickers don't deflate the return
+            portfolio = portfolio.add(ret[ticker] * weights[ticker], fill_value=0)
+            covered_weight += weights[ticker]
     if 0 < covered_weight < 1:
         portfolio = portfolio / covered_weight
-
     portfolio.index = portfolio.index.year
-    return (portfolio * 100).round(2)
+
+    # ── Cumulative growth of $10,000 ──
+    cumulative = (1 + portfolio).cumprod() * 10_000
+
+    # ── Per-holding 10-yr CAGR ──
+    holding_cagr = {}
+    for ticker in tickers:
+        if ticker not in ret.columns:
+            continue
+        series = ret[ticker].dropna()
+        if len(series) < 1:
+            continue
+        n = len(series)
+        total_growth = (1 + series).prod()
+        cagr = (total_growth ** (1 / n) - 1) * 100
+        holding_cagr[ticker] = round(cagr, 2)
+
+    return {
+        "portfolio_annual":   (portfolio * 100).round(2) if not (portfolio * 100).empty else portfolio,
+        "cumulative":         cumulative.round(0),
+        "holding_annualized": holding_cagr,
+    }
 
 
 def _render_401k_returns_chart(holdings: pd.DataFrame):
-    """Bar chart of estimated 401k portfolio annual returns built from holding weights + yfinance prices."""
+    """Annual returns bar, cumulative growth line, 10yr CAGR, per-holding comparison."""
     tickered = holdings[
         holdings["ticker"].apply(lambda x: isinstance(x, str) and bool(x.strip()))
     ].copy()
     if tickered.empty:
         return
 
-    total  = tickered["fair_market_value"].sum()
-    pairs  = tuple(
+    total = tickered["fair_market_value"].sum()
+    pairs = tuple(
         (row["ticker"].upper(), row["fair_market_value"] / total)
         for _, row in tickered.iterrows()
     )
 
-    with st.spinner("Fetching historical prices…"):
-        port_ret = _fetch_weighted_annual_returns(pairs)
+    with st.spinner("Fetching 10-year historical prices…"):
+        data      = _fetch_return_data(pairs)
+        bench_ret = _fetch_benchmark_returns(0.70, 0.30)
 
-    if port_ret.empty:
+    if not data:
         st.warning("Could not fetch historical price data for this portfolio.")
         return
 
-    st.subheader("Estimated 401(k) Portfolio Return by Year")
-    st.caption(
-        "Weighted annual return constructed from current allocation × each holding's "
-        "adjusted-close annual return (yfinance). Stable-value / untickered holdings excluded."
-    )
+    port_ret   = data["portfolio_annual"]
+    cumulative = data["cumulative"]
+    h_cagr     = data["holding_annualized"]
 
-    colors = ["rgba(52,211,153,0.85)" if v >= 0 else "rgba(248,113,113,0.85)"
-              for v in port_ret]
+    # Align benchmark to same years as portfolio
+    common_years = port_ret.index.intersection(bench_ret.index) if not bench_ret.empty else port_ret.index
+    bench_aligned = bench_ret.reindex(common_years)
+    bench_cum     = (1 + bench_ret.reindex(port_ret.index).fillna(0) / 100).cumprod() * 10_000
 
-    fig = go.Figure(go.Bar(
-        x=port_ret.index.astype(str),
-        y=port_ret.values,
-        marker_color=colors,
-        text=[f"{v:+.1f}%" for v in port_ret.values],
-        textposition="outside",
-        hovertemplate="%{x}: %{y:.2f}%<extra></extra>",
+    # ── KPI row ──
+    cagr_10yr  = 0.0
+    bench_cagr = 0.0
+    final_val  = 0.0
+    bench_final = 0.0
+    if len(port_ret) >= 2:
+        n             = len(port_ret)
+        cagr_10yr     = ((1 + port_ret / 100).prod() ** (1 / n) - 1) * 100
+        final_val     = cumulative.iloc[-1] if not cumulative.empty else 0
+        if len(bench_ret) >= 2:
+            nb            = len(bench_ret.reindex(port_ret.index).dropna())
+            bench_cagr    = ((1 + bench_ret.reindex(port_ret.index).dropna() / 100).prod() ** (1 / nb) - 1) * 100
+            bench_final   = bench_cum.iloc[-1] if not bench_cum.empty else 0
+
+        alpha = cagr_10yr - bench_cagr
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Portfolio Annualized Return", f"{cagr_10yr:.2f}%")
+        k2.metric("Benchmark Annualized Return (70/30)", f"{bench_cagr:.2f}%")
+        k3.metric("Alpha vs Benchmark", f"{alpha:+.2f}%", delta=f"{alpha:+.2f}%")
+        k4.metric("Portfolio $10k →", f"${final_val:,.0f}")
+        k5.metric("Benchmark $10k →", f"${bench_final:,.0f}")
+
+    # Stash in session state for save button
+    st.session_state["_401k_returns_cache"] = {
+        "port_ret":   port_ret,
+        "cumulative": cumulative,
+        "cagr_10yr":  round(cagr_10yr, 4),
+        "final_val":  round(final_val, 2),
+    }
+
+    st.divider()
+
+    # ── Cumulative growth — portfolio vs benchmark ──
+    st.subheader("Cumulative Growth of $10,000")
+    st.caption("Portfolio vs 70/30 benchmark (SPY + AGG), starting value $10,000.")
+    fig_cum = go.Figure()
+    fig_cum.add_trace(go.Scatter(
+        x=cumulative.index.astype(str), y=cumulative.values,
+        name="Portfolio", mode="lines+markers",
+        line=dict(color="#6366f1", width=3), marker=dict(size=6),
+        fill="tozeroy", fillcolor="rgba(99,102,241,0.10)",
+        hovertemplate="%{x} Portfolio: $%{y:,.0f}<extra></extra>",
     ))
-    fig.update_layout(
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        height=360,
-        margin=dict(t=40, b=20, l=20, r=20),
-        yaxis=dict(
-            ticksuffix="%",
-            zeroline=True,
-            zerolinecolor="rgba(200,200,200,0.6)",
-            zerolinewidth=1,
-            gridcolor="rgba(128,128,128,0.1)",
-        ),
-        xaxis=dict(showgrid=False),
-        bargap=0.35,
+    if not bench_cum.empty:
+        fig_cum.add_trace(go.Scatter(
+            x=bench_cum.index.astype(str), y=bench_cum.values,
+            name="70/30 Benchmark", mode="lines+markers",
+            line=dict(color="#f59e0b", width=2, dash="dash"), marker=dict(size=5),
+            hovertemplate="%{x} Benchmark: $%{y:,.0f}<extra></extra>",
+        ))
+    fig_cum.update_layout(
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        height=320, margin=dict(t=20, b=20, l=20, r=20),
+        legend=dict(orientation="h", y=1.08, x=0),
+        yaxis=dict(tickprefix="$", tickformat=",", gridcolor="rgba(128,128,128,0.1)"),
+        xaxis=dict(showgrid=False, tickmode="linear", dtick=1, tickangle=-45),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig_cum, use_container_width=True)
+
+    st.divider()
+
+    # ── Annual returns — portfolio vs benchmark ──
+    st.subheader("Annual Return by Year")
+    st.caption("Portfolio vs 70/30 benchmark (SPY + AGG). Untickered / stable-value holdings excluded from portfolio.")
+    years_str = port_ret.index.astype(str).tolist()
+    fig_bar = go.Figure()
+    fig_bar.add_trace(go.Bar(
+        name="Portfolio",
+        x=years_str, y=port_ret.values,
+        marker_color=["rgba(99,102,241,0.85)" if v >= 0 else "rgba(248,113,113,0.85)" for v in port_ret],
+        text=[f"{v:+.1f}%" for v in port_ret.values], textposition="outside",
+        hovertemplate="%{x} Portfolio: %{y:.2f}%<extra></extra>",
+    ))
+    if not bench_aligned.empty:
+        fig_bar.add_trace(go.Bar(
+            name="70/30 Benchmark",
+            x=bench_aligned.index.astype(str), y=bench_aligned.values,
+            marker_color=["rgba(245,158,11,0.75)" if v >= 0 else "rgba(200,100,50,0.75)" for v in bench_aligned],
+            text=[f"{v:+.1f}%" for v in bench_aligned.values], textposition="outside",
+            hovertemplate="%{x} Benchmark: %{y:.2f}%<extra></extra>",
+        ))
+    fig_bar.update_layout(
+        barmode="group", bargap=0.25, bargroupgap=0.05,
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        height=380, margin=dict(t=40, b=20, l=20, r=20),
+        legend=dict(orientation="h", y=1.08, x=0),
+        yaxis=dict(ticksuffix="%", zeroline=True,
+                   zerolinecolor="rgba(200,200,200,0.6)", zerolinewidth=1,
+                   gridcolor="rgba(128,128,128,0.1)"),
+        xaxis=dict(showgrid=False, tickmode="linear", dtick=1, tickangle=-45),
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+    # ── Per-holding annualized return comparison ──
+    if h_cagr:
+        st.divider()
+        st.subheader("10-Year Annualized Return by Holding")
+        st.caption("Annualized return calculated from adjusted monthly close prices over available history.")
+
+        # Include weight info
+        weight_map = {t.upper(): w for t, w in pairs}
+        cagr_rows = sorted(h_cagr.items(), key=lambda x: x[1], reverse=True)
+        cagr_df = pd.DataFrame([
+            {
+                "Ticker":           t,
+                "Annualized Return": f"{v:+.2f}%",
+                "Portfolio Weight":  f"{weight_map.get(t, 0)*100:.1f}%",
+            }
+            for t, v in cagr_rows
+        ])
+
+        bar_colors = ["rgba(52,211,153,0.85)" if v >= 0 else "rgba(248,113,113,0.85)"
+                      for _, v in cagr_rows]
+        fig_h = go.Figure(go.Bar(
+            x=[v for _, v in cagr_rows],
+            y=[t for t, _ in cagr_rows],
+            orientation="h",
+            marker_color=bar_colors,
+            text=[f"{v:+.1f}%" for _, v in cagr_rows],
+            textposition="outside",
+            hovertemplate="%{y}: %{x:.2f}%<extra></extra>",
+        ))
+        fig_h.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            height=max(300, len(cagr_rows) * 26 + 60),
+            margin=dict(t=20, b=20, l=80, r=60),
+            xaxis=dict(ticksuffix="%", zeroline=True,
+                       zerolinecolor="rgba(200,200,200,0.6)", zerolinewidth=1,
+                       gridcolor="rgba(128,128,128,0.1)"),
+            yaxis=dict(showgrid=False, autorange="reversed"),
+        )
+        st.plotly_chart(fig_h, use_container_width=True)
+        st.dataframe(cagr_df, use_container_width=True, hide_index=True)
 
 
 # ── Historical portfolio chart ────────────────────────────────────────────────

@@ -13,6 +13,7 @@ import plotly.graph_objects as go
 from datetime import datetime, date
 import os
 import io
+import requests
 from pathlib import Path
 
 # Ensure project root is on sys.path so src.* imports resolve correctly
@@ -251,7 +252,7 @@ def main():
     st.sidebar.title("🏛️ Louisiana Foundations CRM")
     page = st.sidebar.selectbox(
         "Navigate",
-        ["Dashboard", "Foundation Directory", "Foundation Details", "Investment", "Follow-ups", "Compliance", "Centers of Influence", "Personnel Profiles", "Add Interaction", "Data Management", "Scrapping Data"]
+        ["Dashboard", "Foundation Directory", "Foundation Details", "Investment", "401k", "Follow-ups", "Compliance", "Centers of Influence", "Personnel Profiles", "Add Interaction", "Data Management", "Scrapping Data"]
     )
     
     if page == "Dashboard":
@@ -275,6 +276,8 @@ def main():
         show_add_interaction(crm)
     elif page == "Data Management":
         show_data_management(crm)
+    elif page == "401k":
+        show_401k(crm)
     elif page == "Scrapping Data":
         show_scrapping_data(crm)
 
@@ -1204,9 +1207,382 @@ def show_data_management(crm):
         except Exception as e:
             st.error(f"Error loading database stats: {e}")
 
+
+def show_401k(crm):
+    from src.investments import load_holdings, _render_holdings_charts, _render_401k_returns_chart, _import_from_form5500
+
+    st.title("401(k) Plans")
+
+    tab_import, tab_holdings = st.tabs(["Import from Form 5500", "Holdings & Returns"])
+
+    # ── Tab 1: Import ────────────────────────────────────────────────────────
+    with tab_import:
+        st.subheader("Import Form 5500 Data")
+        st.markdown(
+            "The DOL's EFAST2 database is not accessible via a public API. "
+            "Follow these steps to import data:\n\n"
+            "1. Go to **[DOL Form 5500 Search](https://www.efast.dol.gov/5500Search/)** and search for the plan by EIN or company name.\n"
+            "2. Open the filing and copy the PDF link for the **Schedule of Assets (Schedule H, Part IV)**.\n"
+            "3. Paste the PDF URL below and click **Import Holdings**.\n"
+            "4. Fill in the plan financials and sponsor info manually from the filing."
+        )
+
+        st.divider()
+
+        # ── PDF Holdings Import ──
+        st.subheader("Import Holdings from PDF")
+        pdf_url = st.text_input("Form 5500 PDF — URL or local file path", placeholder="https://...  or  C:\\Users\\...\\filing.pdf")
+
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            with crm.get_connection() as conn:
+                fdf = pd.read_sql_query("SELECT id, name FROM foundations ORDER BY name", conn)
+            f_opts = {"— Select foundation —": None}
+            f_opts.update({row["name"]: int(row["id"]) for _, row in fdf.iterrows()})
+            import_target = st.selectbox("Import holdings into", list(f_opts.keys()), key="efast_import_target")
+        with c2:
+            page_num = st.number_input("Schedule page # (optional)", min_value=1, value=None,
+                                       placeholder="e.g. 43", help="Page number where Schedule of Assets starts")
+
+        if st.button("Import Holdings", type="primary"):
+            if not pdf_url.strip():
+                st.warning("Paste a PDF URL first.")
+            elif not f_opts.get(import_target):
+                st.warning("Select a foundation to import into.")
+            else:
+                with st.spinner("Downloading and parsing Schedule of Assets…"):
+                    count = _import_from_form5500(crm, f_opts[import_target], pdf_url.strip(),
+                                                  start_page=int(page_num) if page_num else None)
+                if count:
+                    st.success(f"Imported {count} holdings. Switch to Holdings & Returns to view.")
+                else:
+                    st.warning("No holdings found. Try specifying the page number where the Schedule of Assets begins.")
+
+        st.divider()
+
+        # ── Plan Info Manual Entry ──
+        st.subheader("Plan Sponsor & Financials")
+        st.caption("Enter data from the filing cover page and Schedule H.")
+
+        with crm.get_connection() as conn:
+            fdf2 = pd.read_sql_query("SELECT id, name FROM foundations ORDER BY name", conn)
+        f_opts2 = {"— Select foundation —": None}
+        f_opts2.update({row["name"]: int(row["id"]) for _, row in fdf2.iterrows()})
+        info_target = st.selectbox("Foundation to update", list(f_opts2.keys()), key="plan_info_target")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            plan_name   = st.text_input("Plan Name", placeholder="e.g. LSU Foundation 403(b) Plan")
+            sponsor_ein = st.text_input("Sponsor EIN", placeholder="72-1234567")
+            plan_year   = st.text_input("Plan Year End", placeholder="2023-12-31")
+            tot_assets  = st.number_input("Total Assets EOY ($)", min_value=0, step=1000)
+        with c2:
+            empr_contrib = st.number_input("Employer Contributions ($)", min_value=0, step=1000)
+            part_contrib = st.number_input("Participant Contributions ($)", min_value=0, step=1000)
+            bene_paid    = st.number_input("Benefits Paid ($)", min_value=0, step=1000)
+            admin_name   = st.text_input("Plan Administrator", placeholder="Name or company")
+
+        if st.button("Save Plan Info") and f_opts2.get(info_target):
+            fid = f_opts2[info_target]
+            notes_parts = []
+            if plan_name:   notes_parts.append(f"Plan: {plan_name}")
+            if sponsor_ein: notes_parts.append(f"EIN: {sponsor_ein}")
+            if plan_year:   notes_parts.append(f"Year End: {plan_year}")
+            if admin_name:  notes_parts.append(f"Administrator: {admin_name}")
+            if tot_assets:  notes_parts.append(f"Total Assets: ${tot_assets:,.0f}")
+            if empr_contrib: notes_parts.append(f"Employer Contrib: ${empr_contrib:,.0f}")
+            if part_contrib: notes_parts.append(f"Participant Contrib: ${part_contrib:,.0f}")
+            if bene_paid:   notes_parts.append(f"Benefits Paid: ${bene_paid:,.0f}")
+
+            if "plan_info" not in st.session_state:
+                st.session_state["plan_info"] = {}
+            st.session_state["plan_info"][fid] = notes_parts
+
+            # Show summary metrics
+            st.success("Plan info saved for this session.")
+
+        if f_opts2.get(info_target):
+            fid = f_opts2[info_target]
+            saved = (st.session_state.get("plan_info") or {}).get(fid)
+            if saved:
+                st.divider()
+                m1, m2, m3, m4 = st.columns(4)
+                def _pick(prefix):
+                    for item in saved:
+                        if item.startswith(prefix):
+                            return item.split(": ", 1)[1]
+                    return "N/A"
+                m1.metric("Total Assets", _pick("Total Assets"))
+                m2.metric("Employer Contrib", _pick("Employer Contrib"))
+                m3.metric("Participant Contrib", _pick("Participant Contrib"))
+                m4.metric("Benefits Paid", _pick("Benefits Paid"))
+
+    # ── Tab 2: Holdings & Returns ────────────────────────────────────────────
+    with tab_holdings:
+        st.subheader("Holdings & Returns by Foundation")
+
+        with crm.get_connection() as conn:
+            df = pd.read_sql_query(
+                """
+                SELECT f.id, f.name, f.city,
+                       COUNT(h.id) AS holdings_count
+                FROM foundations f
+                LEFT JOIN investment_holdings h ON h.foundation_id = f.id AND h.source = 'form5500'
+                GROUP BY f.id
+                ORDER BY f.name
+                """,
+                conn,
+            )
+
+        options = {
+            f"{'★ ' if row['holdings_count'] > 0 else ''}{row['name']}  ({row['city'] or '—'})  —  {row['holdings_count']} holdings": int(row["id"])
+            for _, row in df.iterrows()
+        }
+        selected_label = st.selectbox("Select Foundation", list(options.keys()))
+        foundation_id = options[selected_label]
+
+        holdings = load_holdings(crm, foundation_id)
+        holdings = holdings[holdings["source"] == "form5500"].copy()
+
+        if holdings.empty:
+            st.warning("No Form 5500 holdings on record for this foundation.")
+            return
+
+        total = holdings["fair_market_value"].sum()
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Total FMV", f"${total:,.0f}")
+        k2.metric("Positions", str(len(holdings)))
+        as_of = holdings["as_of_date"].dropna().iloc[0] if not holdings["as_of_date"].dropna().empty else "N/A"
+        k3.metric("As of Date", str(as_of))
+
+        st.divider()
+        _render_401k_returns_chart(holdings)
+
+        # ── Save returns snapshot ──────────────────────────────────────────
+        cached = st.session_state.get("_401k_returns_cache")
+        if cached:
+            st.divider()
+            if st.button("💾 Save Returns Snapshot", type="primary"):
+                port_ret  = cached["port_ret"]
+                cagr      = cached["cagr_10yr"]
+                final_val = cached["final_val"]
+                cum       = cached["cumulative"]
+                with crm.get_connection() as conn:
+                    conn.execute("""
+                        CREATE TABLE IF NOT EXISTS portfolio_returns (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            foundation_id INTEGER NOT NULL,
+                            year INTEGER NOT NULL,
+                            annual_return_pct REAL,
+                            cumulative_10k REAL,
+                            cagr_10yr REAL,
+                            final_10k_value REAL,
+                            saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(foundation_id, year) ON CONFLICT REPLACE
+                        )
+                    """)
+                    for yr, ret_pct in port_ret.items():
+                        conn.execute(
+                            """INSERT OR REPLACE INTO portfolio_returns
+                               (foundation_id, year, annual_return_pct, cumulative_10k, cagr_10yr, final_10k_value)
+                               VALUES (?,?,?,?,?,?)""",
+                            (foundation_id, int(yr), float(ret_pct),
+                             float(cum.get(yr, 0)), round(cagr, 4), round(final_val, 2))
+                        )
+                    conn.commit()
+                st.success(f"Saved {len(port_ret)} annual return records for this foundation.")
+
+        # ── Previously saved snapshot ──────────────────────────────────────
+        with crm.get_connection() as conn:
+            saved_df = pd.read_sql_query(
+                """SELECT year, annual_return_pct, cumulative_10k, cagr_10yr, final_10k_value, saved_at
+                   FROM portfolio_returns WHERE foundation_id=? ORDER BY year""",
+                conn, params=(foundation_id,)
+            )
+        if not saved_df.empty:
+            with st.expander(f"Saved Snapshot ({saved_df['saved_at'].iloc[-1][:10]})", expanded=False):
+                display = saved_df[["year","annual_return_pct","cumulative_10k","cagr_10yr","final_10k_value"]].copy()
+                display.columns = ["Year", "Annual Return (%)", "$10k Value", "Annualized Return (%)", "Final $10k Value"]
+                display["Annual Return (%)"] = display["Annual Return (%)"].map(lambda x: f"{x:+.2f}%")
+                display["$10k Value"]        = display["$10k Value"].map(lambda x: f"${x:,.0f}")
+                display["CAGR (%)"]          = display["CAGR (%)"].map(lambda x: f"{x:.2f}%")
+                display["Final $10k Value"]  = display["Final $10k Value"].map(lambda x: f"${x:,.0f}")
+                st.dataframe(display, use_container_width=True, hide_index=True)
+
+        st.divider()
+        _render_holdings_charts(holdings)
+
+
+def _apollo_search(api_key: str, params: dict, page: int = 1) -> dict:
+    """Call Apollo People Search API and return raw JSON."""
+    body = {
+        "page": page,
+        "per_page": 25,
+        **params,
+    }
+    r = requests.post(
+        "https://api.apollo.io/api/v1/mixed_people/search",
+        json=body,
+        headers={
+            "Cache-Control": "no-cache",
+            "Content-Type": "application/json",
+            "accept": "application/json",
+            "x-api-key": api_key,
+        },
+        timeout=20,
+    )
+    if not r.ok:
+        st.error(f"Apollo error {r.status_code}: {r.text}")
+        r.raise_for_status()
+    return r.json()
+
+
+def _apollo_to_df(people: list) -> pd.DataFrame:
+    """Flatten Apollo people records to the 6 desired columns."""
+    rows = []
+    for p in people:
+        phone = ""
+        nums  = p.get("phone_numbers") or []
+        if nums:
+            phone = nums[0].get("sanitized_number") or nums[0].get("raw_number") or ""
+        org   = p.get("organization") or {}
+        rows.append({
+            "Name":         p.get("name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
+            "Title":        p.get("title") or "",
+            "Email":        p.get("email") or "",
+            "Company":      org.get("name") or p.get("organization_name") or "",
+            "LinkedIn URL": p.get("linkedin_url") or "",
+            "Phone":        phone,
+        })
+    return pd.DataFrame(rows)
+
+
 def show_scrapping_data(crm):
     st.title("Scrapping Data")
-    st.caption("Web scraping tools for enriching foundation data.")
+    st.caption("Pull contact data automatically from Apollo People Search.")
+
+    # ── API key ──
+    st.subheader("Apollo API Key")
+    st.markdown(
+        "Get your key from [Apollo Settings → Integrations → API](https://app.apollo.io/#/settings/integrations/api). "
+        "The free tier includes 50 people exports / month."
+    )
+    api_key = st.text_input("Apollo API Key", type="password",
+                             value=st.session_state.get("apollo_api_key", ""),
+                             placeholder="Paste your Apollo API key here")
+    if api_key:
+        st.session_state["apollo_api_key"] = api_key
+
+    if not api_key:
+        st.info("Enter your Apollo API key above to start searching.")
+        return
+
+    st.divider()
+
+    # ── Search filters ──
+    st.subheader("Search Filters")
+    c1, c2 = st.columns(2)
+    with c1:
+        q_name        = st.text_input("Person name contains", placeholder="e.g. John")
+        q_titles      = st.text_input("Job titles (comma-separated)", placeholder="e.g. Director, VP, President")
+        q_org         = st.text_input("Company / Organization name", placeholder="e.g. LSU Foundation")
+    with c2:
+        q_domain      = st.text_input("Company domain", placeholder="e.g. lsufoundation.org")
+        q_location    = st.text_input("Person location (city or state)", placeholder="e.g. Baton Rouge")
+        max_pages     = st.number_input("Pages to fetch (25 results each)", min_value=1, max_value=10, value=1)
+
+    if st.button("Search Apollo", type="primary"):
+        params = {}
+        if q_titles.strip():
+            params["person_titles"] = [t.strip() for t in q_titles.split(",") if t.strip()]
+        if q_org.strip():
+            params["organization_names"] = [q_org.strip()]
+        if q_domain.strip():
+            params["organization_domains"] = [q_domain.strip()]
+        if q_location.strip():
+            params["person_locations"] = [q_location.strip()]
+        if q_name.strip():
+            params["q_keywords"] = q_name.strip()
+
+        if not params:
+            st.warning("Enter at least one search filter before searching.")
+            return
+
+        all_people = []
+        try:
+            with st.spinner(f"Fetching up to {max_pages * 25} contacts from Apollo…"):
+                for page in range(1, int(max_pages) + 1):
+                    data    = _apollo_search(api_key, params, page=page)
+                    people  = data.get("people") or []
+                    all_people.extend(people)
+                    total   = data.get("pagination", {}).get("total_entries", 0)
+                    if len(all_people) >= total:
+                        break
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 401:
+                st.error("Invalid API key — check your Apollo API key and try again.")
+            else:
+                st.error(f"Apollo API error: {e}")
+            return
+        except Exception as e:
+            st.error(f"Request failed: {e}")
+            return
+
+        if not all_people:
+            st.warning("No contacts found. Try broader search filters.")
+            return
+
+        df = _apollo_to_df(all_people)
+        st.session_state["apollo_results"] = df
+        st.success(f"Found {len(df)} contacts")
+
+    # ── Results ──
+    df = st.session_state.get("apollo_results")
+    if df is None or df.empty:
+        return
+
+    st.dataframe(df, use_container_width=True, hide_index=True,
+                 column_config={
+                     "LinkedIn URL": st.column_config.LinkColumn("LinkedIn URL", display_text="View"),
+                 })
+
+    st.divider()
+    st.subheader("Import to CRM")
+
+    with crm.get_connection() as conn:
+        foundations_df = pd.read_sql_query("SELECT id, name FROM foundations ORDER BY name", conn)
+
+    foundation_options = {"— Don't link to a foundation —": None}
+    foundation_options.update({row["name"]: row["id"] for _, row in foundations_df.iterrows()})
+
+    selected_foundation = st.selectbox("Link contacts to foundation (optional)", list(foundation_options.keys()))
+    foundation_id = foundation_options[selected_foundation]
+
+    if st.button("Import into Centers of Influence", type="primary"):
+        inserted = skipped = 0
+        with crm.get_connection() as conn:
+            for _, row in df.iterrows():
+                name = str(row.get("Name", "")).strip()
+                if not name:
+                    skipped += 1
+                    continue
+                title    = str(row.get("Title", "")).strip() or None
+                linkedin = str(row.get("LinkedIn URL", "")).strip() or None
+                email    = str(row.get("Email", "")).strip() or None
+                phone    = str(row.get("Phone", "")).strip() or None
+                notes_parts = []
+                if email: notes_parts.append(f"Email: {email}")
+                if phone: notes_parts.append(f"Phone: {phone}")
+                notes = " | ".join(notes_parts) or None
+                conn.execute(
+                    """INSERT INTO centers_of_influence
+                       (foundation_id, name, title, linkedin_url, notes)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (foundation_id, name, title, linkedin, notes)
+                )
+                inserted += 1
+            conn.commit()
+        st.success(f"Imported {inserted} contacts ({skipped} skipped — no name).")
 
 
 if __name__ == "__main__":
