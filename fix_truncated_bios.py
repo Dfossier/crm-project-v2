@@ -12,7 +12,7 @@ Strategy per person:
 """
 
 import sys, os
-sys.path.insert(0, "/home/dfoss/crm")
+sys.path.insert(0, "/home/dfoss/.openclaw/workspace/louisiana-foundations-crm")
 
 import sqlite3, re, time
 from bs4 import BeautifulSoup
@@ -24,7 +24,7 @@ from src.bio_scraper import (
     to_domain, resolve_employer_domain, DELAY,
 )
 
-DB_PATH = "/home/dfoss/crm/database/louisiana_foundations.db"
+DB_PATH = "/home/dfoss/.openclaw/workspace/louisiana-foundations-crm/database/louisiana_foundations.db"
 
 # ── Parse source label ────────────────────────────────────────────────────────
 

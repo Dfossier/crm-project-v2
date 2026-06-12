@@ -18,10 +18,12 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
-DB_PATH  = "/home/dfoss/crm/database/louisiana_foundations.db"
-LOG_PATH = "/home/dfoss/crm/bio_scraper_log.json"
-ENV_PATH = "/home/dfoss/crm/.env"
+DB_PATH  = "/home/dfoss/.openclaw/workspace/louisiana-foundations-crm/database/louisiana_foundations.db"
+LOG_PATH = "/home/dfoss/.openclaw/workspace/louisiana-foundations-crm/bio_scraper_log.json"
+ENV_PATH = "/home/dfoss/.openclaw/workspace/louisiana-foundations-crm/.env"
 DELAY    = 1.0   # seconds between HTTP / Serper calls
+
+LINKEDIN_SKIP_DOMAINS = {"linkedin.com", "www.linkedin.com"}
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -34,18 +36,20 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-def _load_serper_key():
-    key = os.getenv("SERPER_API_KEY")
-    if key:
-        return key
+def _load_env_key(var: str) -> str | None:
+    val = os.getenv(var)
+    if val:
+        return val
     p = Path(ENV_PATH)
     if p.exists():
         for line in p.read_text().splitlines():
-            if line.startswith("SERPER_API_KEY="):
+            if line.startswith(f"{var}="):
                 return line.split("=", 1)[1].strip()
     return None
 
-SERPER_KEY = _load_serper_key()
+SERPER_KEY     = _load_env_key("SERPER_API_KEY")
+LOCAL_LLM_URL  = _load_env_key("LOCAL_LLM_URL")
+LOCAL_LLM_MODEL = _load_env_key("LOCAL_LLM_MODEL")
 
 # ── Name helpers ──────────────────────────────────────────────────────────────
 
@@ -100,14 +104,13 @@ def serper(query: str, num: int = 5) -> list:
         print("      SERPER_KEY not set — skipping search")
         return []
     try:
-        r = requests.post(
-            "https://google.serper.dev/search",
-            headers={"X-API-KEY": SERPER_KEY, "Content-Type": "application/json"},
-            json={"q": query, "num": num},
+        r = requests.get(
+            "https://serpapi.com/search",
+            params={"engine": "google", "q": query, "num": num, "api_key": SERPER_KEY},
             timeout=10,
         )
         r.raise_for_status()
-        return r.json().get("organic", [])
+        return r.json().get("organic_results", [])
     except Exception as e:
         print(f"      serper error: {e}")
         return []
@@ -131,6 +134,9 @@ _LINKEDIN_META = re.compile(
     r"location:.*metropolitan area|followers \d+ connections)",
     re.IGNORECASE,
 )
+
+# LinkedIn people-search results: "Name. --. Location." repeated
+_LINKEDIN_PEOPLE_SEARCH = re.compile(r"(\w[\w\s]+\.\s*--\s*\..*){2,}", re.IGNORECASE)
 
 # Social media profile metadata (Instagram, Facebook, Twitter)
 _SOCIAL_META = re.compile(
@@ -171,6 +177,8 @@ def is_good_bio(text: str, person_name: str, min_len: int = 45) -> bool:
         return False
     if _LINKEDIN_META.search(text):
         return False
+    if _LINKEDIN_PEOPLE_SEARCH.search(text):
+        return False
     if _SOCIAL_META.search(text) and len(text) < 200:
         return False   # social media profile stats, not a bio
     if _SALARY_DATA.search(text) and len(text) < 300:
@@ -197,6 +205,48 @@ def clean_snippet(text: str) -> str:
     # Remove date prefix: "May 14, 2026 — text"
     text = re.sub(r"^[A-Z][a-z]{2,8}\s+\d{1,2},\s+\d{4}\s*[—–\-]+\s*", "", text)
     return re.sub(r"\s+", " ", text).strip()[:1600]
+
+# ── LLM bio synthesis ─────────────────────────────────────────────────────────
+
+def llm_extract_bio(page_text: str, person_name: str, source_url: str = "") -> str | None:
+    """
+    Use the local LLM to extract a clean professional bio from raw page text.
+    Calls the OpenAI-compatible endpoint at LOCAL_LLM_URL.
+    Returns None if endpoint not configured or extraction fails.
+    """
+    if not LOCAL_LLM_URL:
+        return None
+    try:
+        excerpt = page_text[:6000]
+        payload = {
+            "model": LOCAL_LLM_MODEL or "local",
+            "max_tokens": 400,
+            "temperature": 0.1,
+            "messages": [{
+                "role": "user",
+                "content": (
+                    f"Extract a professional biography for {person_name} from the text below. "
+                    "Write 2-4 sentences covering their role, career background, and community involvement. "
+                    "Use only facts stated in the text — do not invent anything. "
+                    "If the text contains no meaningful information about this person, reply with exactly: NO_BIO\n\n"
+                    f"Source: {source_url}\n\n{excerpt}"
+                ),
+            }],
+        }
+        r = requests.post(
+            f"{LOCAL_LLM_URL}/chat/completions",
+            json=payload,
+            timeout=60,
+        )
+        r.raise_for_status()
+        result = r.json()["choices"][0]["message"]["content"].strip()
+        if result == "NO_BIO" or len(result) < 40:
+            return None
+        return result
+    except Exception as e:
+        print(f"      llm error: {e}")
+        return None
+
 
 # ── Bio extraction from full HTML page ───────────────────────────────────────
 
@@ -310,7 +360,7 @@ def ensure_bio_column(conn: sqlite3.Connection):
 def write_bio(conn: sqlite3.Connection, cid: int, bio: str, source: str):
     cur = conn.cursor()
     cur.execute(
-        "UPDATE centers_of_influence SET bio=?, updated_at=datetime('now') WHERE id=?",
+        "UPDATE centers_of_influence SET bio=? WHERE id=?",
         (f"[{source}] {bio}", cid),
     )
     conn.commit()
@@ -323,39 +373,50 @@ def has_bio(conn: sqlite3.Connection, cid: int) -> bool:
 
 # ── Per-person bio finder ─────────────────────────────────────────────────────
 
+def _fetch_and_extract(url: str, name: str) -> str | None:
+    """Fetch a URL and extract bio via regex + optional LLM fallback."""
+    if urlparse(url).netloc.lstrip("www.") in LINKEDIN_SKIP_DOMAINS:
+        return None  # LinkedIn blocks scraping
+    html = fetch(url)
+    if not html or len(html) < 1000:
+        return None
+    soup = BeautifulSoup(html, "lxml")
+    for tag in soup.find_all(["nav", "footer", "header", "script", "style"]):
+        tag.decompose()
+    bio = find_bio_on_page(soup, name)
+    if bio and is_good_bio(bio, name):
+        return bio
+    # LLM fallback on full page text when regex comes up empty
+    page_text = soup.get_text(" ", strip=True)
+    return llm_extract_bio(page_text, name, source_url=url)
+
+
 def try_serper_and_fetch(conn, cid, name, query, source_label):
-    """Run *query* through Serper; try snippet first, then fetch linked page."""
+    """Run *query* through SerpAPI; try snippet first, then fetch linked pages."""
     results = serper(query, num=5)
     time.sleep(DELAY)
 
     for r in results:
         snippet = clean_snippet(r.get("snippet", ""))
-        url = r.get("link", "")
+        url     = r.get("link", "")
 
-        # Try fetching the full page for a longer bio
+        # Try fetching the full page for a richer bio
         page_bio = None
-        if url and len(snippet) < 400:
-            html = fetch(url)
-            if html and len(html) > 3000:
-                soup = BeautifulSoup(html, "lxml")
-                for tag in soup.find_all(["nav","footer","header","script","style"]):
-                    tag.decompose()
-                page_bio = find_bio_on_page(soup, name)
-                time.sleep(DELAY)
+        if url:
+            page_bio = _fetch_and_extract(url, name)
+            time.sleep(DELAY)
 
-                # Also follow individual bio links from this page
-                if not page_bio:
+            # Follow individual bio links discovered on the page
+            if not page_bio:
+                html = fetch(url)
+                if html:
+                    soup = BeautifulSoup(html, "lxml")
                     links = find_bio_links(soup, url, [name])
                     if links.get(name):
-                        bio_html = fetch(links[name])
+                        page_bio = _fetch_and_extract(links[name], name)
                         time.sleep(DELAY)
-                        if bio_html:
-                            bio_soup = BeautifulSoup(bio_html, "lxml")
-                            for tag in bio_soup.find_all(["nav","footer","header","script","style"]):
-                                tag.decompose()
-                            page_bio = find_bio_on_page(bio_soup, name)
 
-        # Pick best bio: prefer page_bio if longer, else snippet
+        # Pick best: prefer longer page bio, fall back to snippet
         bio = page_bio if (page_bio and len(page_bio) > len(snippet)) else snippet
         if is_good_bio(bio, name):
             write_bio(conn, cid, bio, source_label)
@@ -366,23 +427,51 @@ def try_serper_and_fetch(conn, cid, name, query, source_label):
     return False
 
 
-def find_bio_for_contact(conn, cid, name, foundation_domain, employer, employer_domain):
-    """Try all methods for one CoI contact. Returns True if bio written."""
+def try_direct_url(conn, cid, name, url, source_label):
+    """Fetch a known URL directly (e.g. LinkedIn profile page)."""
+    if urlparse(url).netloc.lstrip("www.") in LINKEDIN_SKIP_DOMAINS:
+        # LinkedIn blocks scraping — search for the specific profile URL as the query
+        # so SerpAPI returns a cached snippet for that exact profile, not a people-search page
+        return try_serper_and_fetch(conn, cid, name, url, source_label)
+    bio = _fetch_and_extract(url, name)
+    if bio and is_good_bio(bio, name):
+        write_bio(conn, cid, bio, source_label)
+        print(f"      ✓ {name} ({len(bio)} chars) [{source_label}]")
+        print(f"        {bio[:110]}...")
+        return True
+    return False
+
+
+def find_bio_for_contact(conn, cid, name, foundation_domain, employer,
+                         employer_domain, linkedin_url=None, title=None):
+    """Try all strategies for one CoI contact. Returns True if bio written."""
     dname = display_name(name)
 
-    # 1. Foundation site search
+    # 1. LinkedIn — use known URL or search
+    if linkedin_url:
+        if try_direct_url(conn, cid, name, linkedin_url, "linkedin"):
+            return True
+
+    # 2. Foundation site search
     if foundation_domain:
         q = f'"{dname}" site:{foundation_domain}'
         if try_serper_and_fetch(conn, cid, name, q, f"fnd:{foundation_domain}"):
             return True
 
-    # 2. Employer site search (only if different from foundation)
+    # 3. Employer site search (only if different from foundation)
     if employer_domain and employer_domain != foundation_domain:
         q = f'"{dname}" site:{employer_domain}'
         if try_serper_and_fetch(conn, cid, name, q, f"emp:{employer_domain}"):
             return True
 
-    # 3. General fallback search
+    # 4. News / press releases — often richest narrative bios
+    q = f'"{dname}" Louisiana (bank OR attorney OR doctor OR executive OR president)'
+    if title:
+        q = f'"{dname}" "{title}" Louisiana'
+    if try_serper_and_fetch(conn, cid, name, q, "news"):
+        return True
+
+    # 5. General biography / profile search
     q = f'"{dname}" Louisiana (board OR director OR trustee OR foundation OR biography OR profile)'
     if try_serper_and_fetch(conn, cid, name, q, "general"):
         return True
@@ -416,7 +505,7 @@ def main():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT c.id, c.name, c.employer,
+        SELECT c.id, c.name, c.title, c.employer, c.linkedin_url,
                f.website,
                f.name AS fname
         FROM   centers_of_influence c
@@ -430,7 +519,7 @@ def main():
     log = []
     total = 0
 
-    for cid, name, employer, fnd_website, fname in contacts:
+    for cid, name, title, employer, linkedin_url, fnd_website, fname in contacts:
         print(f"\n  [{cid}] {name}")
         if fname:
             print(f"       Foundation: {fname}")
@@ -449,6 +538,8 @@ def main():
             foundation_domain,
             employer,
             employer_domain,
+            linkedin_url=linkedin_url,
+            title=title,
         )
 
         if found:
