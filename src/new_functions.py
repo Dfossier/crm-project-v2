@@ -1,4 +1,5 @@
 import re
+import html
 import streamlit as st
 import pandas as pd
 from src.bio_scraper import is_good_bio
@@ -201,6 +202,8 @@ def show_centers_of_influence(crm):
     # ── Metrics ───────────────────────────────────────────────────────────────
     total = len(df)
 
+    # _has_bio: any non-empty bio text (used for metrics/filter coverage)
+    # is_good_bio: passes quality heuristics (used for badge and rendering)
     def _has_bio(raw):
         if not raw:
             return False
@@ -270,17 +273,18 @@ def show_centers_of_influence(crm):
                 cols = st.columns(len(contact_parts) + (1 if row.linkedin_url else 0))
                 for i, (label, value) in enumerate(contact_parts):
                     with cols[i]:
-                        st.markdown(f"<small style='color:grey'>{label}</small><br>{value}", unsafe_allow_html=True)
+                        st.markdown(f"<small style='color:grey'>{label}</small><br>{html.escape(value)}", unsafe_allow_html=True)
                 if row.linkedin_url:
                     with cols[len(contact_parts)]:
-                        st.markdown(f"<small style='color:grey'>LinkedIn</small><br>[🔗 Profile]({row.linkedin_url})", unsafe_allow_html=True)
+                        st.markdown(f"<small style='color:grey'>LinkedIn</small>", unsafe_allow_html=True)
+                        st.markdown(f"[🔗 Profile]({html.escape(row.linkedin_url)})")
                 st.divider()
 
             if has_bio:
                 st.markdown(
                     f"<div style='border-left:3px solid #89b4fa;padding:8px 12px;"
                     f"background:#181825;border-radius:0 4px 4px 0;line-height:1.7'>"
-                    f"{clean_bio}</div>",
+                    f"{html.escape(clean_bio)}</div>",
                     unsafe_allow_html=True,
                 )
                 if source:
