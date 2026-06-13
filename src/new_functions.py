@@ -4,6 +4,44 @@ import pandas as pd
 from src.bio_scraper import is_good_bio
 
 
+_SOURCE_TAG = re.compile(r"^\[(.*?)\]\s*")
+
+def bio_snippet(raw_bio: str | None, max_chars: int = 120) -> str:
+    """Return first sentence of bio (≤ max_chars), source tag stripped."""
+    if not raw_bio:
+        return ""
+    text = _SOURCE_TAG.sub("", raw_bio).strip()
+    # Try to cut at first sentence boundary
+    dot = text.find(". ")
+    if 0 < dot <= max_chars:
+        return text[: dot + 1]
+    # No sentence boundary — truncate hard
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "…"
+
+
+def bio_source_label(raw_bio: str | None) -> str:
+    """Extract a human-readable source label from the [tag] prefix."""
+    if not raw_bio:
+        return ""
+    m = _SOURCE_TAG.match(raw_bio)
+    if not m:
+        return ""
+    tag = m.group(1)
+    if tag == "general":
+        return "general search"
+    if tag == "news":
+        return "news search"
+    if tag == "linkedin":
+        return "LinkedIn"
+    if tag.startswith("fnd:"):
+        return tag[4:]
+    if tag.startswith("emp:"):
+        return tag[4:]
+    return tag
+
+
 def show_followups(crm):
     """Display upcoming and overdue follow-ups."""
     st.title("📅 Follow-up Reminders")
