@@ -273,11 +273,13 @@ def show_centers_of_influence(crm):
                 cols = st.columns(len(contact_parts) + (1 if row.linkedin_url else 0))
                 for i, (label, value) in enumerate(contact_parts):
                     with cols[i]:
-                        st.markdown(f"<small style='color:grey'>{label}</small><br>{html.escape(value)}", unsafe_allow_html=True)
+                        st.markdown(f"<small style='color:grey'>{html.escape(label)}</small><br>{html.escape(value)}", unsafe_allow_html=True)
                 if row.linkedin_url:
                     with cols[len(contact_parts)]:
                         st.markdown(f"<small style='color:grey'>LinkedIn</small>", unsafe_allow_html=True)
-                        st.markdown(f"[🔗 Profile]({html.escape(row.linkedin_url)})")
+                        url = row.linkedin_url or ""
+                        if url.startswith(("https://", "http://")):
+                            st.markdown(f"[🔗 Profile]({html.escape(url)})")
                 st.divider()
 
             if has_bio:

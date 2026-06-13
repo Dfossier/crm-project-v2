@@ -58,3 +58,6 @@ def test_bio_source_label_no_tag():
 
 def test_bio_source_label_none():
     assert bio_source_label(None) == ""
+
+def test_bio_source_label_unknown_tag():
+    assert bio_source_label("[custom] bio") == "custom"
