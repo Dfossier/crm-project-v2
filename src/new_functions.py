@@ -13,7 +13,7 @@ def bio_snippet(raw_bio: str | None, max_chars: int = 120) -> str:
     text = _SOURCE_TAG.sub("", raw_bio).strip()
     # Try to cut at first sentence boundary
     dot = text.find(". ")
-    if 0 < dot <= max_chars:
+    if 0 < dot < max_chars:
         return text[: dot + 1]
     # No sentence boundary — truncate hard
     if len(text) <= max_chars:

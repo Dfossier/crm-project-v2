@@ -12,13 +12,13 @@ def test_bio_snippet_truncates_at_120_chars():
     long_sentence = "A" * 130 + "."
     bio = f"[general] {long_sentence} Next sentence."
     result = bio_snippet(bio)
-    assert len(result) <= 123  # 120 + "…" possible
+    assert len(result) <= 121  # 120 chars + "…"
     assert result.endswith("…")
 
 def test_bio_snippet_no_period_truncates_at_120():
     bio = "[fnd:example.org] " + "word " * 40
     result = bio_snippet(bio)
-    assert len(result) <= 123
+    assert len(result) <= 121
     assert result.endswith("…")
 
 def test_bio_snippet_none_returns_empty():
@@ -30,6 +30,10 @@ def test_bio_snippet_empty_returns_empty():
 def test_bio_snippet_strips_source_tag():
     bio = "[emp:homebank.com] Jason serves as COO. Other info."
     assert bio_snippet(bio) == "Jason serves as COO."
+
+def test_bio_snippet_no_source_tag():
+    bio = "He is a banker. He has worked in finance for 30 years."
+    assert bio_snippet(bio) == "He is a banker."
 
 
 # ── bio_source_label ──────────────────────────────────────────────────────────
