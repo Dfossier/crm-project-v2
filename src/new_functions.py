@@ -178,106 +178,110 @@ def show_centers_of_influence(crm):
 
     try:
         with crm.get_connection() as conn:
-            query = """
-            SELECT
-                coi.id,
-                coi.name,
-                coi.title,
-                coi.role,
-                coi.employer,
-                coi.employer_city,
-                coi.employer_state,
-                coi.linkedin_url,
-                coi.bio,
-                coi.notes,
-                coi.email,
-                coi.phone,
-                f.name  AS foundation_name,
-                f.city  AS foundation_city
-            FROM centers_of_influence coi
-            LEFT JOIN foundations f ON coi.foundation_id = f.id
-            ORDER BY coi.name
-            """
-            df = pd.read_sql_query(query, conn)
-
-        if len(df) == 0:
-            st.info("No centers of influence recorded.")
-            return
-
-        # ── Coverage metrics ─────────────────────────────────────────────────
-        total        = len(df)
-        with_bio     = int(df['bio'].notna().sum() - (df['bio'] == '').sum())
-        with_linkedin = int(df['linkedin_url'].notna().sum())
-
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Contacts", total)
-        col2.metric("With Bio", f"{with_bio} ({with_bio * 100 // total}%)")
-        col3.metric("With LinkedIn", f"{with_linkedin} ({with_linkedin * 100 // total}%)")
-
-        st.divider()
-
-        # ── Filters ───────────────────────────────────────────────────────────
-        col_f, col_s, col_b = st.columns([2, 2, 1])
-
-        fnd_options = ["All foundations"] + sorted(
-            df['foundation_name'].dropna().unique().tolist()
-        )
-        selected_fnd = col_f.selectbox("Filter by foundation", fnd_options)
-        search_name  = col_s.text_input("Search by name", placeholder="Type a name...")
-        only_no_bio  = col_b.checkbox("Missing bio only")
-
-        filtered = df.copy()
-        if selected_fnd != "All foundations":
-            filtered = filtered[filtered['foundation_name'] == selected_fnd]
-        if search_name:
-            filtered = filtered[filtered['name'].str.contains(search_name, case=False, na=False)]
-        if only_no_bio:
-            filtered = filtered[filtered['bio'].isna() | (filtered['bio'] == '')]
-
-        st.caption(f"Showing {len(filtered)} of {total} contacts")
-
-        # ── Contact cards ─────────────────────────────────────────────────────
-        for row in filtered.itertuples(index=False):
-            bio_raw = row.bio or row.notes or ""
-            # Strip scraper source tag: "[fnd:example.org] actual bio text"
-            bio_clean = re.sub(r"^\[.*?\]\s*", "", str(bio_raw)).strip() if bio_raw else ""
-
-            has_bio = bool(bio_clean) and is_good_bio(bio_clean, row.name)
-            label   = f"{'✅' if has_bio else '❌'} {row.name}"
-            if row.title:
-                label += f" — {row.title}"
-            if row.foundation_name:
-                label += f" | {row.foundation_name}"
-
-            with st.expander(label):
-                # Contact details
-                detail_cols = st.columns(2)
-                with detail_cols[0]:
-                    if row.employer:
-                        loc = ", ".join(filter(None, [row.employer_city, row.employer_state]))
-                        st.write(f"**Employer:** {row.employer}" + (f", {loc}" if loc else ""))
-                    if row.role and row.role != row.title:
-                        st.write(f"**Role:** {row.role}")
-                    if row.email:
-                        st.write(f"**Email:** {row.email}")
-                    if row.phone:
-                        st.write(f"**Phone:** {row.phone}")
-                with detail_cols[1]:
-                    if row.linkedin_url:
-                        st.markdown(f"[🔗 LinkedIn Profile]({row.linkedin_url})")
-                    if row.foundation_city:
-                        st.write(f"**Foundation city:** {row.foundation_city}")
-
-                # Bio
-                st.markdown("---")
-                if bio_clean and is_good_bio(bio_clean, row.name):
-                    st.markdown("**Bio**")
-                    st.write(bio_clean)
-                    source_match = re.match(r"^\[(.*?)\]", str(bio_raw))
-                    if source_match:
-                        st.caption(f"Source: {source_match.group(1)}")
-                else:
-                    st.caption("No bio available yet.")
-
+            df = pd.read_sql_query("""
+                SELECT
+                    coi.id, coi.name, coi.title, coi.role,
+                    coi.employer, coi.employer_city, coi.employer_state,
+                    coi.linkedin_url, coi.bio, coi.notes,
+                    coi.email, coi.phone,
+                    f.name AS foundation_name,
+                    f.city AS foundation_city
+                FROM centers_of_influence coi
+                LEFT JOIN foundations f ON coi.foundation_id = f.id
+                ORDER BY coi.name
+            """, conn)
     except Exception as e:
         st.error(f"Error loading centers of influence: {e}")
+        return
+
+    if df.empty:
+        st.info("No centers of influence recorded.")
+        return
+
+    # ── Metrics ───────────────────────────────────────────────────────────────
+    total = len(df)
+
+    def _has_bio(raw):
+        if not raw:
+            return False
+        clean = _SOURCE_TAG.sub("", str(raw)).strip()
+        return bool(clean)
+
+    with_bio = int(df['bio'].apply(_has_bio).sum())
+    with_linkedin = int(df['linkedin_url'].notna().sum())
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Contacts", total)
+    col2.metric("With Bio", f"{with_bio} ({with_bio * 100 // total}%)")
+    col3.metric("With LinkedIn", f"{with_linkedin} ({with_linkedin * 100 // total}%)")
+
+    st.divider()
+
+    # ── Filters ───────────────────────────────────────────────────────────────
+    col_f, col_s, col_b = st.columns([2, 2, 1])
+    fnd_options = ["All foundations"] + sorted(df['foundation_name'].dropna().unique().tolist())
+    selected_fnd = col_f.selectbox("Filter by foundation", fnd_options)
+    search_name  = col_s.text_input("Search by name", placeholder="Type a name...")
+    only_no_bio  = col_b.checkbox("Missing bio only")
+
+    filtered = df.copy()
+    if selected_fnd != "All foundations":
+        filtered = filtered[filtered['foundation_name'] == selected_fnd]
+    if search_name:
+        filtered = filtered[filtered['name'].str.contains(search_name, case=False, na=False)]
+    if only_no_bio:
+        filtered = filtered[~filtered['bio'].apply(_has_bio)]
+
+    st.caption(f"Showing {len(filtered)} of {total} contacts")
+
+    # ── Contact accordion ─────────────────────────────────────────────────────
+    for row in filtered.itertuples(index=False):
+        raw_bio   = row.bio or row.notes or ""
+        clean_bio = _SOURCE_TAG.sub("", str(raw_bio)).strip() if raw_bio else ""
+        has_bio   = bool(clean_bio) and is_good_bio(clean_bio, row.name)
+
+        snippet = bio_snippet(raw_bio) if has_bio else ""
+        source  = bio_source_label(raw_bio) if has_bio else ""
+
+        badge  = "✓ Bio" if has_bio else "✗ No bio"
+        header = f"{badge} | {row.name}"
+        if row.title:
+            header += f" — {row.title}"
+        if row.foundation_name:
+            header += f" · {row.foundation_name}"
+
+        with st.expander(header, expanded=False):
+            if snippet:
+                st.caption(f"_{snippet}_")
+            elif not has_bio:
+                st.caption("_No bio available yet._")
+
+            # Contact strip — only show fields that have data
+            contact_parts = []
+            if row.employer:
+                loc = ", ".join(filter(None, [row.employer_city, row.employer_state]))
+                contact_parts.append(("Employer", f"{row.employer}" + (f", {loc}" if loc else "")))
+            if row.email:
+                contact_parts.append(("Email", row.email))
+            if row.phone:
+                contact_parts.append(("Phone", row.phone))
+
+            if contact_parts or row.linkedin_url:
+                cols = st.columns(len(contact_parts) + (1 if row.linkedin_url else 0))
+                for i, (label, value) in enumerate(contact_parts):
+                    with cols[i]:
+                        st.markdown(f"<small style='color:grey'>{label}</small><br>{value}", unsafe_allow_html=True)
+                if row.linkedin_url:
+                    with cols[len(contact_parts)]:
+                        st.markdown(f"<small style='color:grey'>LinkedIn</small><br>[🔗 Profile]({row.linkedin_url})", unsafe_allow_html=True)
+                st.divider()
+
+            if has_bio:
+                st.markdown(
+                    f"<div style='border-left:3px solid #89b4fa;padding:8px 12px;"
+                    f"background:#181825;border-radius:0 4px 4px 0;line-height:1.7'>"
+                    f"{clean_bio}</div>",
+                    unsafe_allow_html=True,
+                )
+                if source:
+                    st.caption(f"Source: {source}")
