@@ -170,7 +170,32 @@ class FoundationCRM:
                 'investment_details': investment_details_df,
                 'consultants': consultants_df
             }
-    
+
+    def load_financial_history(self, foundation_id: int):
+        with self.get_connection() as conn:
+            fh = pd.read_sql_query("""
+                SELECT filing_year,
+                       total_assets, investment_assets, total_revenue,
+                       contributions_received, program_service_revenue,
+                       investment_income, capital_gains_losses,
+                       total_expenses, grants_paid, administrative_expenses,
+                       fundraising_expenses, total_liabilities, net_assets_eoy
+                FROM financial_history
+                WHERE foundation_id = ?
+                ORDER BY filing_year
+            """, conn, params=(foundation_id,))
+
+            inv = pd.read_sql_query("""
+                SELECT filing_year,
+                       securities_publicly_traded, securities_other,
+                       program_related_investments, capital_gains, net_investment_income
+                FROM investment_details
+                WHERE foundation_id = ?
+                ORDER BY filing_year
+            """, conn, params=(foundation_id,))
+
+        return fh, inv
+
     def add_interaction(self, foundation_id, interaction_type, contact_person, 
                        subject, notes, follow_up_date=None):
         """Add a new interaction record."""
@@ -233,6 +258,118 @@ class FoundationCRM:
             """, conn)
             
             return stats
+
+def show_financial_history_tab(crm, foundation_id: int):
+    fh, inv = crm.load_financial_history(foundation_id)
+    all_years = list(range(2020, 2025))
+
+    # ── Coverage row ────────────────────────────────────────────────────────
+    st.subheader("Data Coverage")
+    years_with_data = set(fh['filing_year'].tolist()) if not fh.empty else set()
+    missing = [y for y in all_years if y not in years_with_data]
+
+    cols = st.columns(5)
+    for i, year in enumerate(all_years):
+        with cols[i]:
+            if year in years_with_data:
+                st.success(f"✓ {year}")
+            else:
+                st.error(f"✗ {year}")
+
+    if missing:
+        st.info(f"No filing data found for: {', '.join(str(y) for y in missing)}. "
+                f"These years will show as gaps in the charts below.")
+
+    if fh.empty:
+        st.warning("No financial history available for this foundation. "
+                   "Run `ingest_990_financials.py` to populate real data.")
+        return
+
+    # ── YoY: Assets ─────────────────────────────────────────────────────────
+    st.subheader("Assets Over Time")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=fh['filing_year'], y=fh['total_assets'],
+                             mode='lines+markers', name='Total Assets',
+                             connectgaps=False))
+    fig.add_trace(go.Scatter(x=fh['filing_year'], y=fh['investment_assets'],
+                             mode='lines+markers', name='Investment Assets',
+                             connectgaps=False))
+    fig.update_layout(yaxis_tickprefix='$', yaxis_tickformat=',.0f',
+                      xaxis=dict(tickmode='array', tickvals=all_years),
+                      height=300, margin=dict(t=20, b=20))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Delta row
+    if len(fh) >= 2:
+        latest = fh.iloc[-1]
+        prior  = fh.iloc[-2]
+        delta  = latest['total_assets'] - prior['total_assets']
+        direction = "▲" if delta >= 0 else "▼"
+        st.caption(f"Total Assets {direction} ${abs(delta)/1e6:.1f}M from {int(prior['filing_year'])}")
+
+    # ── YoY: Revenue breakdown ───────────────────────────────────────────────
+    st.subheader("Revenue Breakdown")
+    fig2 = go.Figure()
+    for col, label in [('contributions_received', 'Contributions'),
+                        ('investment_income',      'Investment Income'),
+                        ('program_service_revenue','Program Service Revenue')]:
+        if col in fh.columns:
+            fig2.add_trace(go.Scatter(x=fh['filing_year'], y=fh[col],
+                                      mode='lines+markers', name=label,
+                                      connectgaps=False))
+    fig2.update_layout(yaxis_tickprefix='$', yaxis_tickformat=',.0f',
+                       xaxis=dict(tickmode='array', tickvals=all_years),
+                       height=300, margin=dict(t=20, b=20))
+    st.plotly_chart(fig2, use_container_width=True)
+
+    # ── YoY: Capital gains/losses ────────────────────────────────────────────
+    st.subheader("Capital Gains / Losses")
+    if 'capital_gains_losses' in fh.columns and fh['capital_gains_losses'].notna().any():
+        colors = ['#2ecc71' if v >= 0 else '#e74c3c'
+                  for v in fh['capital_gains_losses'].fillna(0)]
+        fig3 = go.Figure(go.Bar(x=fh['filing_year'], y=fh['capital_gains_losses'],
+                                marker_color=colors, name='Capital Gains/Losses'))
+        fig3.add_hline(y=0, line_dash='dash', line_color='gray')
+        fig3.update_layout(yaxis_tickprefix='$', yaxis_tickformat=',.0f',
+                           xaxis=dict(tickmode='array', tickvals=all_years),
+                           height=280, margin=dict(t=20, b=20))
+        st.plotly_chart(fig3, use_container_width=True)
+    else:
+        st.info("Capital gains/losses data not available.")
+
+    # ── YoY: Grants paid + payout ratio ─────────────────────────────────────
+    st.subheader("Grants Paid & Payout Ratio")
+    fig4 = go.Figure()
+    fig4.add_trace(go.Bar(x=fh['filing_year'], y=fh['grants_paid'],
+                          name='Grants Paid', yaxis='y1'))
+    payout = (fh['grants_paid'] / fh['total_assets'] * 100).where(fh['total_assets'] > 0)
+    fig4.add_trace(go.Scatter(x=fh['filing_year'], y=payout, mode='lines+markers',
+                              name='Payout %', yaxis='y2'))
+    fig4.update_layout(
+        yaxis=dict(tickprefix='$', tickformat=',.0f', title='Grants Paid'),
+        yaxis2=dict(ticksuffix='%', overlaying='y', side='right', title='Payout %'),
+        xaxis=dict(tickmode='array', tickvals=all_years),
+        height=300, margin=dict(t=20, b=20), legend=dict(orientation='h')
+    )
+    st.plotly_chart(fig4, use_container_width=True)
+
+    # ── Investment breakdown (most recent year) ──────────────────────────────
+    if not inv.empty:
+        st.subheader(f"Investment Breakdown ({int(inv.iloc[-1]['filing_year'])})")
+        latest_inv = inv.iloc[-1]
+        breakdown = {
+            'Publicly Traded Securities': latest_inv.get('securities_publicly_traded') or 0,
+            'Other Securities':           latest_inv.get('securities_other') or 0,
+            'Program-Related':            latest_inv.get('program_related_investments') or 0,
+        }
+        breakdown = {k: v for k, v in breakdown.items() if v > 0}
+        if breakdown:
+            fig5 = go.Figure(go.Pie(labels=list(breakdown.keys()),
+                                    values=list(breakdown.values()),
+                                    hole=0.35))
+            fig5.update_layout(height=280, margin=dict(t=20, b=20))
+            st.plotly_chart(fig5, use_container_width=True)
+
 
 def main():
     crm = FoundationCRM()
@@ -480,220 +617,225 @@ def show_foundation_details(crm):
             
             if details['foundation'] is not None:
                 foundation = details['foundation']
-                
-                # Basic information
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.subheader("📋 Basic Information")
-                    st.text(f"EIN: {foundation['ein']}")
-                    st.text(f"Legal Name: {foundation['name']}")
-                    st.text(f"City: {foundation['city']}, {foundation['state']} {foundation['zip_code']}")
-                    
-                    # Website links
-                    if foundation.get('website'):
-                        st.markdown(f"[🌐 Visit Website]({foundation['website']})")
-                    
-                    if foundation.get('board_url') and foundation['board_url'] != '':
-                        st.markdown(f"[👥 View Board Page]({foundation['board_url']})")
-                    
-                    if foundation.get('about_url') and foundation['about_url'] != '':
-                        st.markdown(f"[ℹ️ View About Page]({foundation['about_url']})")
-                    
-                    if foundation.get('phone'):
-                        st.text(f"Phone: {foundation['phone']}")
-                    if foundation.get('email'):
-                        st.text(f"Email: {foundation['email']}")
-                
-                with col2:
-                    st.subheader("💰 Financial Summary")
-                    if foundation['investment_assets']:
-                        st.metric("Investment Assets", f"${foundation['investment_assets']/1_000_000:.1f}M")
-                    if foundation['annual_grants']:
-                        st.metric("Annual Grants", f"${foundation['annual_grants']/1_000_000:.1f}M")
-                    if foundation['annual_revenue']:
-                        st.metric("Annual Revenue", f"${foundation['annual_revenue']/1_000_000:.1f}M")
-                    
-                    st.text(f"Last Filing: {foundation['filing_year']}")
-                    st.text(f"Tax Status: {foundation['tax_exempt_status']}")
-                
-                # Detailed 990 Personnel Information
-                if len(details['personnel_990']) > 0:
-                    st.subheader("👥 Executive Leadership & Board (Form 990 Data)")
-                    
-                    personnel_990_df = details['personnel_990']
-                    
-                    # Executive Officers with Compensation
-                    executives = personnel_990_df[
-                        (personnel_990_df['is_president'] == 1) | 
-                        (personnel_990_df['is_ceo'] == 1) | 
-                        (personnel_990_df['is_cfo'] == 1) |
-                        (personnel_990_df['is_vice_president'] == 1)
-                    ]
-                    
-                    if len(executives) > 0:
-                        st.write("**💼 Executive Officers & Compensation:**")
-                        for _, exec in executives.itertuples(index=False):
-                            roles = []
-                            if exec['is_president'] == 1: roles.append('President')
-                            if exec['is_ceo'] == 1: roles.append('CEO') 
-                            if exec['is_cfo'] == 1: roles.append('CFO')
-                            if exec['is_vice_president'] == 1: roles.append('Vice President')
-                            
-                            role_str = ' & '.join(roles)
-                            total_comp = exec['compensation'] + (exec['benefits'] or 0)
-                            
-                            st.write(f"• **{exec['name']}** - {role_str}")
-                            st.write(f"  💰 Base: ${exec['compensation']:,.0f} | Benefits: ${exec['benefits'] or 0:,.0f} | **Total: ${total_comp:,.0f}**")
-                            if exec['hours_per_week']:
-                                st.write(f"  ⏰ Hours/week: {exec['hours_per_week']}")
-                    
-                    # 990 Filer
-                    filer = personnel_990_df[personnel_990_df['is_990_filer'] == 1]
-                    if len(filer) > 0:
-                        st.write("**📋 Form 990 Filed By:**")
-                        for _, f in filer.itertuples(index=False):
-                            comp_str = f"${f['compensation']:,.0f}" if f['compensation'] > 0 else "No compensation"
-                            st.write(f"• **{f['name']}** - {f['title']} ({comp_str})")
-                    
-                    # Other Officers (Secretary, Treasurer, etc.)
-                    other_officers = personnel_990_df[
-                        (personnel_990_df['is_officer'] == 1) & 
-                        (personnel_990_df['is_president'] != 1) & 
-                        (personnel_990_df['is_ceo'] != 1) & 
-                        (personnel_990_df['is_cfo'] != 1) &
-                        (personnel_990_df['is_vice_president'] != 1)
-                    ]
-                    
-                    if len(other_officers) > 0:
-                        with st.expander("🏛️ Other Officers"):
-                            for _, officer in other_officers.itertuples(index=False):
-                                comp_str = f"${officer['compensation']:,.0f}" if officer['compensation'] > 0 else "No compensation"
-                                st.write(f"• **{officer['name']}** - {officer['title']} ({comp_str})")
-                    
-                    # Board of Trustees/Directors
-                    board = personnel_990_df[
-                        (personnel_990_df['is_trustee'] == 1) | 
-                        (personnel_990_df['is_director'] == 1)
-                    ]
-                    
-                    if len(board) > 0:
-                        with st.expander("👥 Board of Directors/Trustees"):
-                            for _, member in board.itertuples(index=False):
-                                comp_str = f"${member['compensation']:,.0f}" if member['compensation'] > 0 else "Volunteer"
-                                hours_str = f" ({member['hours_per_week']}h/week)" if member['hours_per_week'] else ""
-                                st.write(f"• **{member['name']}** - {member['title']} ({comp_str}){hours_str}")
-                                # Display bio if available
-                                if member.get('bio') and member['bio'] and str(member['bio']).strip():
-                                    st.write(f"  📝 *{member['bio'][:200]}{'...' if len(str(member['bio'])) > 200 else ''}*")
-                                elif member.get('biography') and member['biography'] and str(member['biography']).strip():
-                                    st.write(f"  📝 *{member['biography'][:200]}{'...' if len(str(member['biography'])) > 200 else ''}*")
-                                # Display LinkedIn link if available
-                                if member.get('linkedin_url') and member['linkedin_url']:
-                                    st.markdown(f"[💼 LinkedIn Profile]({member['linkedin_url']})")
-                
-                # Investment Portfolio Details
-                if len(details['investment_details']) > 0:
-                    st.subheader("📊 Investment Portfolio Analysis")
-                    
-                    inv_details = details['investment_details'].iloc[0]
-                    
+                tab_overview, tab_financial = st.tabs(["📋 Overview", "📈 Financial History"])
+
+                with tab_overview:
+                    # Basic information
                     col1, col2 = st.columns(2)
-                    
+
                     with col1:
-                        st.write("**Portfolio Allocation:**")
-                        total_investments = inv_details['securities_publicly_traded'] + inv_details['securities_other'] + inv_details['program_related_investments'] + inv_details['other_investments']
-                        
-                        if total_investments > 0:
-                            st.write(f"• Publicly Traded Securities: ${inv_details['securities_publicly_traded']/1e6:.1f}M ({inv_details['securities_publicly_traded']/total_investments*100:.1f}%)")
-                            st.write(f"• Other Securities: ${inv_details['securities_other']/1e6:.1f}M ({inv_details['securities_other']/total_investments*100:.1f}%)")
-                            st.write(f"• Program Related Investments: ${inv_details['program_related_investments']/1e6:.1f}M ({inv_details['program_related_investments']/total_investments*100:.1f}%)")
-                            st.write(f"• Other Investments: ${inv_details['other_investments']/1e6:.1f}M ({inv_details['other_investments']/total_investments*100:.1f}%)")
-                    
+                        st.subheader("📋 Basic Information")
+                        st.text(f"EIN: {foundation['ein']}")
+                        st.text(f"Legal Name: {foundation['name']}")
+                        st.text(f"City: {foundation['city']}, {foundation['state']} {foundation['zip_code']}")
+
+                        # Website links
+                        if foundation.get('website'):
+                            st.markdown(f"[🌐 Visit Website]({foundation['website']})")
+
+                        if foundation.get('board_url') and foundation['board_url'] != '':
+                            st.markdown(f"[👥 View Board Page]({foundation['board_url']})")
+
+                        if foundation.get('about_url') and foundation['about_url'] != '':
+                            st.markdown(f"[ℹ️ View About Page]({foundation['about_url']})")
+
+                        if foundation.get('phone'):
+                            st.text(f"Phone: {foundation['phone']}")
+                        if foundation.get('email'):
+                            st.text(f"Email: {foundation['email']}")
+
                     with col2:
-                        st.write("**Investment Performance:**")
-                        st.write(f"• Dividend Income: ${inv_details['dividend_income']/1e6:.1f}M")
-                        st.write(f"• Interest Income: ${inv_details['interest_income']/1e6:.1f}M") 
-                        st.write(f"• Capital Gains: ${inv_details['capital_gains']/1e6:.1f}M")
-                        st.write(f"• Investment Expenses: ${inv_details['investment_expenses']/1e6:.1f}M")
-                        st.write(f"• **Net Investment Income: ${inv_details['net_investment_income']/1e6:.1f}M**")
-                        
-                        net_return = inv_details['net_investment_income'] / total_investments * 100 if total_investments > 0 else 0
-                        st.write(f"• **Total Return: {net_return:.1f}%**")
-                
-                # Professional Services & Consultants
-                if len(details['consultants']) > 0:
-                    st.subheader("💼 Professional Services & Consultant Payments")
-                    
-                    consultants_df = details['consultants']
-                    
-                    # Investment Management
-                    investment_mgmt = consultants_df[consultants_df['is_investment_advisor'] == 1]
-                    if len(investment_mgmt) > 0:
-                        st.write("**💰 Investment Management:**")
-                        for _, advisor in investment_mgmt.itertuples(index=False):
-                            fee_pct_str = f" ({advisor['fee_percentage']*100:.2f}% of assets)" if advisor['fee_percentage'] else ""
-                            st.write(f"• **{advisor['name']}** - ${advisor['amount_paid']:,.0f}/year{fee_pct_str}")
-                            if advisor['description']:
-                                st.write(f"  📝 {advisor['description']}")
-                    
-                    # Other Professional Services
-                    other_services = consultants_df[consultants_df['is_investment_advisor'] != 1]
-                    if len(other_services) > 0:
-                        with st.expander("🏢 Other Professional Services"):
-                            for _, service in other_services.itertuples(index=False):
-                                service_type = service['service_type'].replace('_', ' ').title()
-                                st.write(f"• **{service['name']}** ({service_type}) - ${service['amount_paid']:,.0f}")
-                                if service['description']:
-                                    st.write(f"  📝 {service['description']}")
-                    
-                    # Total professional service costs
-                    total_costs = consultants_df['amount_paid'].sum()
-                    st.write(f"**📊 Total Professional Service Costs: ${total_costs:,.0f}/year**")
-                
-                # Legacy personnel data (fallback if 990 data not available)
-                elif len(details['personnel']) > 0:
-                    st.subheader("👥 Key Personnel & Board Members")
-                    
-                    personnel_df = details['personnel']
-                    
-                    with st.expander("📋 Personnel Information"):
-                        display_cols = ['name', 'title', 'role', 'compensation', 'hours_per_week']
-                        available_cols = [col for col in display_cols if col in personnel_df.columns]
-                        st.dataframe(personnel_df[available_cols], width=None)
-                
-                # Investment Advisors
-                if len(details['investment_advisors']) > 0:
-                    st.subheader("💼 Investment Advisors & Contract Payments")
-                    
-                    for _, advisor in details['investment_advisors'].itertuples(index=False):
-                        with st.expander(f"📊 {advisor['advisor_name']} - ${advisor['annual_fee']:,}/year"):
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.write(f"**EIN**: {advisor['advisor_ein']}")
-                                st.write(f"**Services**: {advisor['services']}")
-                                st.write(f"**Contract Start**: {advisor['contract_start']}")
-                            with col2:
-                                st.write(f"**Annual Fee**: ${advisor['annual_fee']:,}")
-                                st.write(f"**Fee Type**: {advisor['fee_type'].replace('_', ' ').title()}")
-                                if advisor['fee_percentage']:
-                                    st.write(f"**Fee Rate**: {advisor['fee_percentage']:.2f}% of assets")
-                                st.write(f"**Assets Managed**: ${advisor['assets_managed']/1_000_000:.1f}M")
-                
-                # Focus Areas
-                if len(details['focus_areas']) > 0:
-                    st.subheader("🎯 Focus Areas")
-                    st.dataframe(details['focus_areas'][['category', 'subcategory', 'description']], use_container_width=True)
-                
-                # Recent Interactions
-                if len(details['interactions']) > 0:
-                    st.subheader("📞 Recent Interactions")
-                    st.dataframe(
-                        details['interactions'][['interaction_date', 'interaction_type', 'contact_person', 'subject']],
-                        use_container_width=True
-                    )
-                else:
-                    st.info("No interactions recorded yet.")
+                        st.subheader("💰 Financial Summary")
+                        if foundation['investment_assets']:
+                            st.metric("Investment Assets", f"${foundation['investment_assets']/1_000_000:.1f}M")
+                        if foundation['annual_grants']:
+                            st.metric("Annual Grants", f"${foundation['annual_grants']/1_000_000:.1f}M")
+                        if foundation['annual_revenue']:
+                            st.metric("Annual Revenue", f"${foundation['annual_revenue']/1_000_000:.1f}M")
+
+                        st.text(f"Last Filing: {foundation['filing_year']}")
+                        st.text(f"Tax Status: {foundation['tax_exempt_status']}")
+
+                    # Detailed 990 Personnel Information
+                    if len(details['personnel_990']) > 0:
+                        st.subheader("👥 Executive Leadership & Board (Form 990 Data)")
+
+                        personnel_990_df = details['personnel_990']
+
+                        # Executive Officers with Compensation
+                        executives = personnel_990_df[
+                            (personnel_990_df['is_president'] == 1) |
+                            (personnel_990_df['is_ceo'] == 1) |
+                            (personnel_990_df['is_cfo'] == 1) |
+                            (personnel_990_df['is_vice_president'] == 1)
+                        ]
+
+                        if len(executives) > 0:
+                            st.write("**💼 Executive Officers & Compensation:**")
+                            for _, exec in executives.itertuples(index=False):
+                                roles = []
+                                if exec['is_president'] == 1: roles.append('President')
+                                if exec['is_ceo'] == 1: roles.append('CEO')
+                                if exec['is_cfo'] == 1: roles.append('CFO')
+                                if exec['is_vice_president'] == 1: roles.append('Vice President')
+
+                                role_str = ' & '.join(roles)
+                                total_comp = exec['compensation'] + (exec['benefits'] or 0)
+
+                                st.write(f"• **{exec['name']}** - {role_str}")
+                                st.write(f"  💰 Base: ${exec['compensation']:,.0f} | Benefits: ${exec['benefits'] or 0:,.0f} | **Total: ${total_comp:,.0f}**")
+                                if exec['hours_per_week']:
+                                    st.write(f"  ⏰ Hours/week: {exec['hours_per_week']}")
+
+                        # 990 Filer
+                        filer = personnel_990_df[personnel_990_df['is_990_filer'] == 1]
+                        if len(filer) > 0:
+                            st.write("**📋 Form 990 Filed By:**")
+                            for _, f in filer.itertuples(index=False):
+                                comp_str = f"${f['compensation']:,.0f}" if f['compensation'] > 0 else "No compensation"
+                                st.write(f"• **{f['name']}** - {f['title']} ({comp_str})")
+
+                        # Other Officers (Secretary, Treasurer, etc.)
+                        other_officers = personnel_990_df[
+                            (personnel_990_df['is_officer'] == 1) &
+                            (personnel_990_df['is_president'] != 1) &
+                            (personnel_990_df['is_ceo'] != 1) &
+                            (personnel_990_df['is_cfo'] != 1) &
+                            (personnel_990_df['is_vice_president'] != 1)
+                        ]
+
+                        if len(other_officers) > 0:
+                            with st.expander("🏛️ Other Officers"):
+                                for _, officer in other_officers.itertuples(index=False):
+                                    comp_str = f"${officer['compensation']:,.0f}" if officer['compensation'] > 0 else "No compensation"
+                                    st.write(f"• **{officer['name']}** - {officer['title']} ({comp_str})")
+
+                        # Board of Trustees/Directors
+                        board = personnel_990_df[
+                            (personnel_990_df['is_trustee'] == 1) |
+                            (personnel_990_df['is_director'] == 1)
+                        ]
+
+                        if len(board) > 0:
+                            with st.expander("👥 Board of Directors/Trustees"):
+                                for _, member in board.itertuples(index=False):
+                                    comp_str = f"${member['compensation']:,.0f}" if member['compensation'] > 0 else "Volunteer"
+                                    hours_str = f" ({member['hours_per_week']}h/week)" if member['hours_per_week'] else ""
+                                    st.write(f"• **{member['name']}** - {member['title']} ({comp_str}){hours_str}")
+                                    # Display bio if available
+                                    if member.get('bio') and member['bio'] and str(member['bio']).strip():
+                                        st.write(f"  📝 *{member['bio'][:200]}{'...' if len(str(member['bio'])) > 200 else ''}*")
+                                    elif member.get('biography') and member['biography'] and str(member['biography']).strip():
+                                        st.write(f"  📝 *{member['biography'][:200]}{'...' if len(str(member['biography'])) > 200 else ''}*")
+                                    # Display LinkedIn link if available
+                                    if member.get('linkedin_url') and member['linkedin_url']:
+                                        st.markdown(f"[💼 LinkedIn Profile]({member['linkedin_url']})")
+
+                    # Investment Portfolio Details
+                    if len(details['investment_details']) > 0:
+                        st.subheader("📊 Investment Portfolio Analysis")
+
+                        inv_details = details['investment_details'].iloc[0]
+
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            st.write("**Portfolio Allocation:**")
+                            total_investments = inv_details['securities_publicly_traded'] + inv_details['securities_other'] + inv_details['program_related_investments'] + inv_details['other_investments']
+
+                            if total_investments > 0:
+                                st.write(f"• Publicly Traded Securities: ${inv_details['securities_publicly_traded']/1e6:.1f}M ({inv_details['securities_publicly_traded']/total_investments*100:.1f}%)")
+                                st.write(f"• Other Securities: ${inv_details['securities_other']/1e6:.1f}M ({inv_details['securities_other']/total_investments*100:.1f}%)")
+                                st.write(f"• Program Related Investments: ${inv_details['program_related_investments']/1e6:.1f}M ({inv_details['program_related_investments']/total_investments*100:.1f}%)")
+                                st.write(f"• Other Investments: ${inv_details['other_investments']/1e6:.1f}M ({inv_details['other_investments']/total_investments*100:.1f}%)")
+
+                        with col2:
+                            st.write("**Investment Performance:**")
+                            st.write(f"• Dividend Income: ${inv_details['dividend_income']/1e6:.1f}M")
+                            st.write(f"• Interest Income: ${inv_details['interest_income']/1e6:.1f}M")
+                            st.write(f"• Capital Gains: ${inv_details['capital_gains']/1e6:.1f}M")
+                            st.write(f"• Investment Expenses: ${inv_details['investment_expenses']/1e6:.1f}M")
+                            st.write(f"• **Net Investment Income: ${inv_details['net_investment_income']/1e6:.1f}M**")
+
+                            net_return = inv_details['net_investment_income'] / total_investments * 100 if total_investments > 0 else 0
+                            st.write(f"• **Total Return: {net_return:.1f}%**")
+
+                    # Professional Services & Consultants
+                    if len(details['consultants']) > 0:
+                        st.subheader("💼 Professional Services & Consultant Payments")
+
+                        consultants_df = details['consultants']
+
+                        # Investment Management
+                        investment_mgmt = consultants_df[consultants_df['is_investment_advisor'] == 1]
+                        if len(investment_mgmt) > 0:
+                            st.write("**💰 Investment Management:**")
+                            for _, advisor in investment_mgmt.itertuples(index=False):
+                                fee_pct_str = f" ({advisor['fee_percentage']*100:.2f}% of assets)" if advisor['fee_percentage'] else ""
+                                st.write(f"• **{advisor['name']}** - ${advisor['amount_paid']:,.0f}/year{fee_pct_str}")
+                                if advisor['description']:
+                                    st.write(f"  📝 {advisor['description']}")
+
+                        # Other Professional Services
+                        other_services = consultants_df[consultants_df['is_investment_advisor'] != 1]
+                        if len(other_services) > 0:
+                            with st.expander("🏢 Other Professional Services"):
+                                for _, service in other_services.itertuples(index=False):
+                                    service_type = service['service_type'].replace('_', ' ').title()
+                                    st.write(f"• **{service['name']}** ({service_type}) - ${service['amount_paid']:,.0f}")
+                                    if service['description']:
+                                        st.write(f"  📝 {service['description']}")
+
+                        # Total professional service costs
+                        total_costs = consultants_df['amount_paid'].sum()
+                        st.write(f"**📊 Total Professional Service Costs: ${total_costs:,.0f}/year**")
+
+                    # Legacy personnel data (fallback if 990 data not available)
+                    elif len(details['personnel']) > 0:
+                        st.subheader("👥 Key Personnel & Board Members")
+
+                        personnel_df = details['personnel']
+
+                        with st.expander("📋 Personnel Information"):
+                            display_cols = ['name', 'title', 'role', 'compensation', 'hours_per_week']
+                            available_cols = [col for col in display_cols if col in personnel_df.columns]
+                            st.dataframe(personnel_df[available_cols], width=None)
+
+                    # Investment Advisors
+                    if len(details['investment_advisors']) > 0:
+                        st.subheader("💼 Investment Advisors & Contract Payments")
+
+                        for _, advisor in details['investment_advisors'].itertuples(index=False):
+                            with st.expander(f"📊 {advisor['advisor_name']} - ${advisor['annual_fee']:,}/year"):
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.write(f"**EIN**: {advisor['advisor_ein']}")
+                                    st.write(f"**Services**: {advisor['services']}")
+                                    st.write(f"**Contract Start**: {advisor['contract_start']}")
+                                with col2:
+                                    st.write(f"**Annual Fee**: ${advisor['annual_fee']:,}")
+                                    st.write(f"**Fee Type**: {advisor['fee_type'].replace('_', ' ').title()}")
+                                    if advisor['fee_percentage']:
+                                        st.write(f"**Fee Rate**: {advisor['fee_percentage']:.2f}% of assets")
+                                    st.write(f"**Assets Managed**: ${advisor['assets_managed']/1_000_000:.1f}M")
+
+                    # Focus Areas
+                    if len(details['focus_areas']) > 0:
+                        st.subheader("🎯 Focus Areas")
+                        st.dataframe(details['focus_areas'][['category', 'subcategory', 'description']], use_container_width=True)
+
+                    # Recent Interactions
+                    if len(details['interactions']) > 0:
+                        st.subheader("📞 Recent Interactions")
+                        st.dataframe(
+                            details['interactions'][['interaction_date', 'interaction_type', 'contact_person', 'subject']],
+                            use_container_width=True
+                        )
+                    else:
+                        st.info("No interactions recorded yet.")
+
+                with tab_financial:
+                    show_financial_history_tab(crm, foundation_id)
             
     except Exception as e:
         st.error(f"Error loading foundation details: {e}")
