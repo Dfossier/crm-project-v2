@@ -420,10 +420,11 @@ def show_financial_comparison(crm):
     selected_years = list(range(year_range[0], year_range[1] + 1))
 
     try:
-        all_foundations = pd.read_sql_query(
-            "SELECT id, name FROM foundations ORDER BY name",
-            crm.get_connection()
-        )
+        with crm.get_connection() as conn:
+            all_foundations = pd.read_sql_query(
+                "SELECT id, name FROM foundations ORDER BY name",
+                conn
+            )
     except Exception as e:
         st.error(f"Could not load foundations: {e}")
         return
