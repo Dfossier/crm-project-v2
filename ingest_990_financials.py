@@ -45,3 +45,91 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
             cur.execute(f"ALTER TABLE financial_history ADD COLUMN {col} {col_type}")
     cur.execute("DELETE FROM investment_details")
     conn.commit()
+
+
+def _amt(el, *tags) -> float | None:
+    """Try each tag in order; return float value of first match, or None."""
+    for tag in tags:
+        val = _t(el, tag)
+        if val:
+            try:
+                return float(val)
+            except ValueError:
+                pass
+    return None
+
+
+def parse_990_financials(xml_bytes: bytes) -> dict | None:
+    """Parse financial fields from a Form 990 XML filing. Returns None on parse error."""
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as e:
+        log.warning(f"XML parse error: {e}")
+        return None
+
+    ns = IRS_NS
+    body = root.find(f'{{{ns}}}ReturnData/{{{ns}}}IRS990')
+    if body is None:
+        log.warning("IRS990 element not found in XML")
+        return None
+
+    pub_traded = _amt(body, 'InvestmentsPubliclyTradedSecAmt') or 0.0
+    other_sec  = _amt(body, 'InvestmentsOtherSecuritiesAmt') or 0.0
+    prog_rel   = _amt(body, 'InvestmentsProgramRelatedAmt') or 0.0
+
+    return {
+        'total_revenue':           _amt(body, 'TotalRevenueAmt'),
+        'contributions_received':  _amt(body, 'CYContributionsGrantsAmt', 'ContriGiftsGrantsEtc'),
+        'program_service_revenue': _amt(body, 'CYProgramServiceRevenueAmt'),
+        'investment_income':       _amt(body, 'CYInvestmentIncomeAmt'),
+        'capital_gains_losses':    _amt(body, 'NetGainLossFromSalesOfAssetsAmt'),
+        'total_expenses':          _amt(body, 'CYTotalExpensesAmt', 'TotalFunctionalExpensesAmt'),
+        'grants_paid':             _amt(body, 'CYGrantsAndSimilarAmountsPaidAmt'),
+        'administrative_expenses': _amt(body, 'CYMgmtAndGeneralExpensesAmt'),
+        'fundraising_expenses':    _amt(body, 'CYFundraisingExpensesAmt'),
+        'total_assets':            _amt(body, 'TotalAssetsEOYAmt'),
+        'total_liabilities':       _amt(body, 'TotalLiabilitiesEOYAmt'),
+        'net_assets_eoy':          _amt(body, 'NetAssetsOrFundBalancesEOYAmt'),
+        'investment_assets':       pub_traded + other_sec + prog_rel,
+        'securities_publicly_traded': pub_traded,
+        'securities_other':           other_sec,
+        'program_related_investments': prog_rel,
+    }
+
+
+def parse_990pf_financials(xml_bytes: bytes) -> dict | None:
+    """Parse financial fields from a Form 990PF XML filing. Returns None on parse error."""
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as e:
+        log.warning(f"XML parse error: {e}")
+        return None
+
+    ns = IRS_NS
+    body = root.find(f'{{{ns}}}ReturnData/{{{ns}}}IRS990PF')
+    if body is None:
+        log.warning("IRS990PF element not found in XML")
+        return None
+
+    dividends = _amt(body, 'DividendsAmt') or 0.0
+    interest   = _amt(body, 'InterestAmt') or 0.0
+    inv_sec    = _amt(body, 'InvstmntSecEOYAmt') or 0.0
+
+    return {
+        'total_revenue':           _amt(body, 'TotalRevAndExpnssAmt', 'TotalRevenueAndExpensesAmt'),
+        'contributions_received':  _amt(body, 'TotContriPaidAmt', 'ContributionsReceivedAmt'),
+        'program_service_revenue': None,
+        'investment_income':       dividends + interest,
+        'capital_gains_losses':    _amt(body, 'NetGainLossCapitalAmt', 'NetSTCapitalGainLossAmt'),
+        'total_expenses':          _amt(body, 'TotalExpensesPFAmt'),
+        'grants_paid':             _amt(body, 'QualifyingDistributionsAmt'),
+        'administrative_expenses': None,
+        'fundraising_expenses':    None,
+        'total_assets':            _amt(body, 'TotAssetsEOYAmt'),
+        'total_liabilities':       _amt(body, 'TotLiabilitiesEOYAmt'),
+        'net_assets_eoy':          _amt(body, 'TotNetAstOrFundBalancesEOYAmt'),
+        'investment_assets':       inv_sec,
+        'securities_publicly_traded': inv_sec,
+        'securities_other':           None,
+        'program_related_investments': None,
+    }
