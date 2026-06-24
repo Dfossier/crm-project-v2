@@ -196,6 +196,29 @@ class FoundationCRM:
 
         return fh, inv
 
+    def load_comparison_data(self, foundation_ids: list, years: list) -> pd.DataFrame:
+        if not foundation_ids or not years:
+            return pd.DataFrame()
+        placeholders_f = ','.join('?' * len(foundation_ids))
+        placeholders_y = ','.join('?' * len(years))
+        with self.get_connection() as conn:
+            df = pd.read_sql_query(f"""
+                SELECT f.name, fh.foundation_id, fh.filing_year,
+                       fh.total_assets, fh.investment_assets, fh.total_revenue,
+                       fh.contributions_received, fh.investment_income,
+                       fh.capital_gains_losses, fh.grants_paid, fh.net_assets_eoy,
+                       fh.total_liabilities,
+                       CASE WHEN fh.total_assets > 0
+                            THEN fh.grants_paid / fh.total_assets * 100
+                            ELSE NULL END AS grant_payout_ratio
+                FROM financial_history fh
+                JOIN foundations f ON f.id = fh.foundation_id
+                WHERE fh.foundation_id IN ({placeholders_f})
+                  AND fh.filing_year IN ({placeholders_y})
+                ORDER BY f.name, fh.filing_year
+            """, conn, params=foundation_ids + years)
+        return df
+
     def add_interaction(self, foundation_id, interaction_type, contact_person, 
                        subject, notes, follow_up_date=None):
         """Add a new interaction record."""
@@ -371,6 +394,147 @@ def show_financial_history_tab(crm, foundation_id: int):
             st.plotly_chart(fig5, use_container_width=True)
 
 
+COMPARISON_METRICS = {
+    'Total Assets':         'total_assets',
+    'Investment Assets':    'investment_assets',
+    'Capital Gains/Losses': 'capital_gains_losses',
+    'Contributions Received': 'contributions_received',
+    'Investment Income':    'investment_income',
+    'Grants Paid':          'grants_paid',
+    'Net Assets':           'net_assets_eoy',
+    'Grant Payout Ratio %': 'grant_payout_ratio',
+}
+
+
+def show_financial_comparison(crm):
+    st.title("📊 Financial Comparison")
+
+    # ── Sidebar controls ─────────────────────────────────────────────────────
+    metric_label = st.sidebar.selectbox("Metric", list(COMPARISON_METRICS.keys()))
+    metric_col   = COMPARISON_METRICS[metric_label]
+
+    all_years = list(range(2020, 2025))
+    year_range = st.sidebar.select_slider(
+        "Year Range", options=all_years, value=(2020, 2024)
+    )
+    selected_years = list(range(year_range[0], year_range[1] + 1))
+
+    try:
+        all_foundations = pd.read_sql_query(
+            "SELECT id, name FROM foundations ORDER BY name",
+            crm.get_connection()
+        )
+    except Exception as e:
+        st.error(f"Could not load foundations: {e}")
+        return
+
+    selected_names = st.sidebar.multiselect(
+        "Foundations", options=all_foundations['name'].tolist(),
+        default=all_foundations['name'].tolist()
+    )
+    selected_ids = all_foundations[
+        all_foundations['name'].isin(selected_names)
+    ]['id'].tolist()
+
+    if not selected_ids:
+        st.info("Select at least one foundation.")
+        return
+
+    df = crm.load_comparison_data(selected_ids, selected_years)
+
+    # ── Snapshot vs. Trend view ───────────────────────────────────────────────
+    is_single_year = len(selected_years) == 1
+
+    if is_single_year:
+        year = selected_years[0]
+        st.subheader(f"{metric_label} — {year}")
+
+        # Build full roster including foundations with no data
+        snapshot = df[df['filing_year'] == year][['name', metric_col]].copy()
+        all_names_df = pd.DataFrame({'name': selected_names})
+        snapshot = all_names_df.merge(snapshot, on='name', how='left')
+        snapshot = snapshot.sort_values(metric_col, ascending=True, na_position='first')
+
+        is_pct = 'ratio' in metric_col or 'pct' in metric_col
+        colors = ['#cccccc' if pd.isna(v) else '#2c7bb6' for v in snapshot[metric_col]]
+        hover = snapshot[metric_col].apply(
+            lambda v: "No data" if pd.isna(v)
+            else (f"{v:.1f}%" if is_pct else f"${v:,.0f}")
+        )
+
+        fig = go.Figure(go.Bar(
+            x=snapshot[metric_col], y=snapshot['name'],
+            orientation='h', marker_color=colors,
+            hovertext=hover, hoverinfo='text+y'
+        ))
+        tick_fmt = '.1f' if is_pct else ',.0f'
+        tick_prefix = '' if is_pct else '$'
+        tick_suffix = '%' if is_pct else ''
+        fig.update_layout(
+            xaxis=dict(tickformat=tick_fmt, tickprefix=tick_prefix, ticksuffix=tick_suffix),
+            height=max(400, len(selected_names) * 22),
+            margin=dict(l=200, t=20, b=40)
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    else:
+        st.subheader(f"{metric_label} — {selected_years[0]}–{selected_years[-1]}")
+
+        fig = go.Figure()
+        for name in selected_names:
+            fdata = df[df['name'] == name].sort_values('filing_year')
+            n_years = fdata['filing_year'].nunique()
+            completeness = f"{n_years}/{len(selected_years)} yrs"
+            fig.add_trace(go.Scatter(
+                x=fdata['filing_year'], y=fdata[metric_col],
+                mode='lines+markers', name=f"{name} ({completeness})",
+                connectgaps=False
+            ))
+        is_pct = 'ratio' in metric_col or 'pct' in metric_col
+        fig.update_layout(
+            yaxis=dict(
+                tickformat='.1f' if is_pct else ',.0f',
+                tickprefix='' if is_pct else '$',
+                ticksuffix='%' if is_pct else ''
+            ),
+            xaxis=dict(tickmode='array', tickvals=selected_years),
+            height=450, margin=dict(t=20, b=20),
+            legend=dict(orientation='v', x=1.01)
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── Data table ───────────────────────────────────────────────────────────
+    st.subheader("Data Table")
+    if df.empty:
+        st.info("No data for selected foundations and years.")
+    else:
+        pivot = df.pivot_table(index='name', columns='filing_year',
+                               values=metric_col, aggfunc='first')
+        pivot = pivot.reindex(columns=selected_years)
+        pivot.columns = [str(y) for y in pivot.columns]
+        pivot = pivot.reset_index().rename(columns={'name': 'Foundation'})
+
+        # Format for display
+        is_pct = 'ratio' in metric_col or 'pct' in metric_col
+        year_cols = [str(y) for y in selected_years]
+        display = pivot.copy()
+        for col in year_cols:
+            display[col] = display[col].apply(
+                lambda v: '—' if pd.isna(v)
+                else (f"{v:.1f}%" if is_pct else f"${v:,.0f}")
+            )
+        st.dataframe(display, use_container_width=True, hide_index=True)
+
+        # CSV export (raw numbers)
+        csv_bytes = pivot.to_csv(index=False).encode()
+        st.download_button(
+            label="⬇ Download CSV",
+            data=csv_bytes,
+            file_name=f"foundation_{metric_col}_comparison.csv",
+            mime='text/csv'
+        )
+
+
 def main():
     crm = FoundationCRM()
     
@@ -378,7 +542,7 @@ def main():
     st.sidebar.title("🏛️ Louisiana Foundations CRM")
     page = st.sidebar.selectbox(
         "Navigate",
-        ["Dashboard", "Foundation Directory", "Foundation Details", "Follow-ups", "Compliance", "Centers of Influence", "Add Interaction", "Data Management"]
+        ["Dashboard", "Foundation Directory", "Foundation Details", "Follow-ups", "Compliance", "Centers of Influence", "Add Interaction", "Data Management", "📊 Financial Comparison"]
     )
     
     if page == "Dashboard":
@@ -397,6 +561,8 @@ def main():
         show_add_interaction(crm)
     elif page == "Data Management":
         show_data_management(crm)
+    elif page == "📊 Financial Comparison":
+        show_financial_comparison(crm)
 
 def show_dashboard(crm):
     """Display the main dashboard with summary statistics."""
