@@ -159,3 +159,91 @@ def test_parse_990pf_financials_balance_sheet():
 def test_parse_990pf_financials_bad_xml_returns_none():
     result = parse_990pf_financials(b"<broken")
     assert result is None
+
+
+from ingest_990_financials import (
+    migrate_schema, upsert_financial_history, upsert_investment_details
+)
+
+
+@pytest.fixture
+def migrated_db():
+    conn = sqlite3.connect(':memory:')
+    conn.execute("""
+        CREATE TABLE financial_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            foundation_id INTEGER,
+            filing_year INTEGER,
+            total_assets REAL, investment_assets REAL,
+            total_revenue REAL, total_expenses REAL,
+            grants_paid REAL, administrative_expenses REAL,
+            fundraising_expenses REAL, net_assets_change REAL,
+            UNIQUE(foundation_id, filing_year)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE investment_details (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            foundation_id INTEGER, filing_year INTEGER,
+            securities_publicly_traded REAL, securities_other REAL,
+            program_related_investments REAL, other_investments REAL,
+            dividend_income REAL, interest_income REAL,
+            capital_gains REAL, rental_income REAL,
+            investment_expenses REAL, net_investment_income REAL,
+            investment_policy_exists BOOLEAN, spending_policy_exists BOOLEAN
+        )
+    """)
+    migrate_schema(conn)
+    return conn
+
+
+def test_upsert_financial_history_inserts(migrated_db):
+    data = {
+        'total_revenue': 5_000_000.0, 'contributions_received': 3_000_000.0,
+        'program_service_revenue': 500_000.0, 'investment_income': 400_000.0,
+        'capital_gains_losses': 200_000.0, 'total_expenses': 4_000_000.0,
+        'grants_paid': 3_500_000.0, 'administrative_expenses': 300_000.0,
+        'fundraising_expenses': 100_000.0, 'total_assets': 50_000_000.0,
+        'investment_assets': 45_000_000.0, 'total_liabilities': 2_000_000.0,
+        'net_assets_eoy': 48_000_000.0,
+    }
+    upsert_financial_history(migrated_db, 1, 2023, data)
+    row = migrated_db.execute(
+        "SELECT total_assets, contributions_received FROM financial_history WHERE foundation_id=1 AND filing_year=2023"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 50_000_000.0
+    assert row[1] == 3_000_000.0
+
+
+def test_upsert_financial_history_replaces_on_conflict(migrated_db):
+    data = {'total_assets': 10.0, 'contributions_received': 1.0,
+            'program_service_revenue': None, 'investment_income': None,
+            'capital_gains_losses': None, 'total_expenses': None,
+            'grants_paid': None, 'administrative_expenses': None,
+            'fundraising_expenses': None, 'investment_assets': None,
+            'total_liabilities': None, 'net_assets_eoy': None, 'total_revenue': None}
+    upsert_financial_history(migrated_db, 1, 2022, data)
+    data['total_assets'] = 99.0
+    upsert_financial_history(migrated_db, 1, 2022, data)
+    rows = migrated_db.execute(
+        "SELECT COUNT(*), total_assets FROM financial_history WHERE foundation_id=1 AND filing_year=2022"
+    ).fetchone()
+    assert rows[0] == 1
+    assert rows[1] == 99.0
+
+
+def test_upsert_investment_details_inserts(migrated_db):
+    data = {
+        'securities_publicly_traded': 40_000_000.0,
+        'securities_other': 5_000_000.0,
+        'program_related_investments': 1_000_000.0,
+        'investment_income': 400_000.0,
+        'capital_gains_losses': 200_000.0,
+    }
+    upsert_investment_details(migrated_db, 1, 2023, data)
+    row = migrated_db.execute(
+        "SELECT securities_publicly_traded, capital_gains FROM investment_details"
+    ).fetchone()
+    assert row[0] == 40_000_000.0
+    assert row[1] == 200_000.0

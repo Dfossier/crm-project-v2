@@ -97,6 +97,59 @@ def parse_990_financials(xml_bytes: bytes) -> dict | None:
     }
 
 
+def upsert_financial_history(conn: sqlite3.Connection, foundation_id: int,
+                              filing_year: int, data: dict) -> None:
+    conn.execute("""
+        INSERT OR REPLACE INTO financial_history
+            (foundation_id, filing_year,
+             total_assets, investment_assets, total_revenue, total_expenses,
+             grants_paid, administrative_expenses, fundraising_expenses,
+             contributions_received, investment_income, capital_gains_losses,
+             total_liabilities, net_assets_eoy, program_service_revenue)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        foundation_id, filing_year,
+        data.get('total_assets'),
+        data.get('investment_assets'),
+        data.get('total_revenue'),
+        data.get('total_expenses'),
+        data.get('grants_paid'),
+        data.get('administrative_expenses'),
+        data.get('fundraising_expenses'),
+        data.get('contributions_received'),
+        data.get('investment_income'),
+        data.get('capital_gains_losses'),
+        data.get('total_liabilities'),
+        data.get('net_assets_eoy'),
+        data.get('program_service_revenue'),
+    ))
+    conn.commit()
+
+
+def upsert_investment_details(conn: sqlite3.Connection, foundation_id: int,
+                               filing_year: int, data: dict) -> None:
+    conn.execute("""
+        INSERT INTO investment_details
+            (foundation_id, filing_year,
+             securities_publicly_traded, securities_other,
+             program_related_investments, other_investments,
+             capital_gains, net_investment_income,
+             dividend_income, interest_income)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+    """, (
+        foundation_id, filing_year,
+        data.get('securities_publicly_traded'),
+        data.get('securities_other'),
+        data.get('program_related_investments'),
+        None,
+        data.get('capital_gains_losses'),
+        data.get('investment_income'),
+        None,  # dividends not separately tracked in 990; available in 990PF via investment_income
+        None,
+    ))
+    conn.commit()
+
+
 def parse_990pf_financials(xml_bytes: bytes) -> dict | None:
     """Parse financial fields from a Form 990PF XML filing. Returns None on parse error."""
     try:
