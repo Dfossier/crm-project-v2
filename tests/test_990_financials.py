@@ -48,10 +48,12 @@ def test_migrate_adds_new_columns(mem_db):
         assert expected in cols, f"Missing column: {expected}"
 
 
-def test_migrate_clears_investment_details(mem_db):
+def test_migrate_does_not_clear_investment_details(mem_db):
+    # migrate_schema no longer clears investment_details;
+    # the clear is done in ingest() so re-runs don't duplicate rows.
     migrate_schema(mem_db)
     count = mem_db.execute("SELECT COUNT(*) FROM investment_details").fetchone()[0]
-    assert count == 0
+    assert count == 1  # pre-seeded row survives migrate_schema
 
 
 def test_migrate_is_idempotent(mem_db):

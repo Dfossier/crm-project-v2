@@ -37,13 +37,12 @@ NEW_FH_COLUMNS = [
 
 
 def migrate_schema(conn: sqlite3.Connection) -> None:
-    """Add new columns to financial_history and clear synthetic investment_details."""
+    """Add new columns to financial_history if they are missing."""
     cur = conn.cursor()
     existing = {r[1] for r in cur.execute("PRAGMA table_info(financial_history)").fetchall()}
     for col, col_type in NEW_FH_COLUMNS:
         if col not in existing:
             cur.execute(f"ALTER TABLE financial_history ADD COLUMN {col} {col_type}")
-    cur.execute("DELETE FROM investment_details")
     conn.commit()
 
 
@@ -331,6 +330,11 @@ def ingest() -> None:
 
     log.info("=== Migrating schema ===")
     migrate_schema(conn)
+
+    cur = conn.cursor()
+    cur.execute("DELETE FROM investment_details")
+    conn.commit()
+    log.info("Cleared investment_details for fresh repopulation")
 
     # coverage[ein][year] = True/False
     coverage: dict = {ein: {} for ein in target}

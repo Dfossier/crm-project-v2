@@ -326,9 +326,10 @@ def show_financial_history_tab(crm, foundation_id: int):
     if len(fh) >= 2:
         latest = fh.iloc[-1]
         prior  = fh.iloc[-2]
-        delta  = latest['total_assets'] - prior['total_assets']
-        direction = "▲" if delta >= 0 else "▼"
-        st.caption(f"Total Assets {direction} ${abs(delta)/1e6:.1f}M from {int(prior['filing_year'])}")
+        if pd.notna(latest['total_assets']) and pd.notna(prior['total_assets']):
+            delta = latest['total_assets'] - prior['total_assets']
+            direction = "▲" if delta >= 0 else "▼"
+            st.caption(f"Total Assets {direction} ${abs(delta)/1e6:.1f}M from {int(prior['filing_year'])}")
 
     # ── YoY: Revenue breakdown ───────────────────────────────────────────────
     st.subheader("Revenue Breakdown")
