@@ -1148,10 +1148,12 @@ def show_foundation_details(crm):
                                 if exec['is_vice_president'] == 1: roles.append('Vice President')
 
                                 role_str = ' & '.join(roles)
-                                total_comp = exec['compensation'] + (exec['benefits'] or 0)
+                                comp     = exec['compensation'] or 0
+                                benefits = exec['benefits'] or 0
+                                total_comp = comp + benefits
 
                                 st.write(f"• **{exec['name']}** - {role_str}")
-                                st.write(f"  💰 Base: ${exec['compensation']:,.0f} | Benefits: ${exec['benefits'] or 0:,.0f} | **Total: ${total_comp:,.0f}**")
+                                st.write(f"  💰 Base: ${comp:,.0f} | Benefits: ${benefits:,.0f} | **Total: ${total_comp:,.0f}**")
                                 if exec['hours_per_week']:
                                     st.write(f"  ⏰ Hours/week: {exec['hours_per_week']}")
 
@@ -1207,25 +1209,37 @@ def show_foundation_details(crm):
 
                         col1, col2 = st.columns(2)
 
+                        def _v(x):
+                            return x if x is not None and x == x else 0.0
+
                         with col1:
                             st.write("**Portfolio Allocation:**")
-                            total_investments = inv_details['securities_publicly_traded'] + inv_details['securities_other'] + inv_details['program_related_investments'] + inv_details['other_investments']
+                            sec_pub  = _v(inv_details['securities_publicly_traded'])
+                            sec_oth  = _v(inv_details['securities_other'])
+                            sec_pri  = _v(inv_details['program_related_investments'])
+                            sec_misc = _v(inv_details['other_investments'])
+                            total_investments = sec_pub + sec_oth + sec_pri + sec_misc
 
                             if total_investments > 0:
-                                st.write(f"• Publicly Traded Securities: ${inv_details['securities_publicly_traded']/1e6:.1f}M ({inv_details['securities_publicly_traded']/total_investments*100:.1f}%)")
-                                st.write(f"• Other Securities: ${inv_details['securities_other']/1e6:.1f}M ({inv_details['securities_other']/total_investments*100:.1f}%)")
-                                st.write(f"• Program Related Investments: ${inv_details['program_related_investments']/1e6:.1f}M ({inv_details['program_related_investments']/total_investments*100:.1f}%)")
-                                st.write(f"• Other Investments: ${inv_details['other_investments']/1e6:.1f}M ({inv_details['other_investments']/total_investments*100:.1f}%)")
+                                st.write(f"• Publicly Traded Securities: ${sec_pub/1e6:.1f}M ({sec_pub/total_investments*100:.1f}%)")
+                                st.write(f"• Other Securities: ${sec_oth/1e6:.1f}M ({sec_oth/total_investments*100:.1f}%)")
+                                st.write(f"• Program Related Investments: ${sec_pri/1e6:.1f}M ({sec_pri/total_investments*100:.1f}%)")
+                                st.write(f"• Other Investments: ${sec_misc/1e6:.1f}M ({sec_misc/total_investments*100:.1f}%)")
 
                         with col2:
+                            div_inc  = _v(inv_details['dividend_income'])
+                            int_inc  = _v(inv_details['interest_income'])
+                            cap_gain = _v(inv_details['capital_gains'])
+                            inv_exp  = _v(inv_details['investment_expenses'])
+                            net_inv  = _v(inv_details['net_investment_income'])
                             st.write("**Investment Performance:**")
-                            st.write(f"• Dividend Income: ${inv_details['dividend_income']/1e6:.1f}M")
-                            st.write(f"• Interest Income: ${inv_details['interest_income']/1e6:.1f}M")
-                            st.write(f"• Capital Gains: ${inv_details['capital_gains']/1e6:.1f}M")
-                            st.write(f"• Investment Expenses: ${inv_details['investment_expenses']/1e6:.1f}M")
-                            st.write(f"• **Net Investment Income: ${inv_details['net_investment_income']/1e6:.1f}M**")
+                            st.write(f"• Dividend Income: ${div_inc/1e6:.1f}M")
+                            st.write(f"• Interest Income: ${int_inc/1e6:.1f}M")
+                            st.write(f"• Capital Gains: ${cap_gain/1e6:.1f}M")
+                            st.write(f"• Investment Expenses: ${inv_exp/1e6:.1f}M")
+                            st.write(f"• **Net Investment Income: ${net_inv/1e6:.1f}M**")
 
-                            net_return = inv_details['net_investment_income'] / total_investments * 100 if total_investments > 0 else 0
+                            net_return = net_inv / total_investments * 100 if total_investments > 0 else 0
                             st.write(f"• **Total Return: {net_return:.1f}%**")
 
                     # Professional Services & Consultants
