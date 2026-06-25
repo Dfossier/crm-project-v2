@@ -1063,8 +1063,8 @@ def show_foundation_details(crm):
             st.warning("No foundation data available.")
             return
         
-        foundation_options = {f"{row.name} ({row.city})": row.id
-                            for _, row in df.itertuples(index=False)}
+        foundation_options = {f"{row['name']} ({row['city']})": row['id']
+                            for _, row in df.iterrows()}
 
         nav_f = st.session_state.pop('_nav_foundation', None)
         if nav_f:
@@ -1140,7 +1140,7 @@ def show_foundation_details(crm):
 
                         if len(executives) > 0:
                             st.write("**💼 Executive Officers & Compensation:**")
-                            for _, exec in executives.itertuples(index=False):
+                            for _, exec in executives.iterrows():
                                 roles = []
                                 if exec['is_president'] == 1: roles.append('President')
                                 if exec['is_ceo'] == 1: roles.append('CEO')
@@ -1159,7 +1159,7 @@ def show_foundation_details(crm):
                         filer = personnel_990_df[personnel_990_df['is_990_filer'] == 1]
                         if len(filer) > 0:
                             st.write("**📋 Form 990 Filed By:**")
-                            for _, f in filer.itertuples(index=False):
+                            for _, f in filer.iterrows():
                                 comp_str = f"${f['compensation']:,.0f}" if f['compensation'] > 0 else "No compensation"
                                 st.write(f"• **{f['name']}** - {f['title']} ({comp_str})")
 
@@ -1174,7 +1174,7 @@ def show_foundation_details(crm):
 
                         if len(other_officers) > 0:
                             with st.expander("🏛️ Other Officers"):
-                                for _, officer in other_officers.itertuples(index=False):
+                                for _, officer in other_officers.iterrows():
                                     comp_str = f"${officer['compensation']:,.0f}" if officer['compensation'] > 0 else "No compensation"
                                     st.write(f"• **{officer['name']}** - {officer['title']} ({comp_str})")
 
@@ -1186,7 +1186,7 @@ def show_foundation_details(crm):
 
                         if len(board) > 0:
                             with st.expander("👥 Board of Directors/Trustees"):
-                                for _, member in board.itertuples(index=False):
+                                for _, member in board.iterrows():
                                     comp_str = f"${member['compensation']:,.0f}" if member['compensation'] > 0 else "Volunteer"
                                     hours_str = f" ({member['hours_per_week']}h/week)" if member['hours_per_week'] else ""
                                     st.write(f"• **{member['name']}** - {member['title']} ({comp_str}){hours_str}")
@@ -1238,7 +1238,7 @@ def show_foundation_details(crm):
                         investment_mgmt = consultants_df[consultants_df['is_investment_advisor'] == 1]
                         if len(investment_mgmt) > 0:
                             st.write("**💰 Investment Management:**")
-                            for _, advisor in investment_mgmt.itertuples(index=False):
+                            for _, advisor in investment_mgmt.iterrows():
                                 fee_pct_str = f" ({advisor['fee_percentage']*100:.2f}% of assets)" if advisor['fee_percentage'] else ""
                                 st.write(f"• **{advisor['name']}** - ${advisor['amount_paid']:,.0f}/year{fee_pct_str}")
                                 if advisor['description']:
@@ -1248,7 +1248,7 @@ def show_foundation_details(crm):
                         other_services = consultants_df[consultants_df['is_investment_advisor'] != 1]
                         if len(other_services) > 0:
                             with st.expander("🏢 Other Professional Services"):
-                                for _, service in other_services.itertuples(index=False):
+                                for _, service in other_services.iterrows():
                                     service_type = service['service_type'].replace('_', ' ').title()
                                     st.write(f"• **{service['name']}** ({service_type}) - ${service['amount_paid']:,.0f}")
                                     if service['description']:
@@ -1273,7 +1273,7 @@ def show_foundation_details(crm):
                     if len(details['investment_advisors']) > 0:
                         st.subheader("💼 Investment Advisors & Contract Payments")
 
-                        for _, advisor in details['investment_advisors'].itertuples(index=False):
+                        for _, advisor in details['investment_advisors'].iterrows():
                             with st.expander(f"📊 {advisor['advisor_name']} - ${advisor['annual_fee']:,}/year"):
                                 col1, col2 = st.columns(2)
                                 with col1:
@@ -1318,8 +1318,8 @@ def show_add_interaction(crm):
             st.warning("No foundation data available.")
             return
         
-        foundation_options = {f"{row.name} ({row.city})": row.id 
-                            for _, row in df.itertuples(index=False)}
+        foundation_options = {f"{row['name']} ({row['city']})": row['id']
+                            for _, row in df.iterrows()}
         
         with st.form("add_interaction"):
             selected_name = st.selectbox("Foundation", options=list(foundation_options.keys()))
