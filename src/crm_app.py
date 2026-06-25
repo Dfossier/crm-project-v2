@@ -814,7 +814,7 @@ def show_financial_comparison(crm):
         short = perf.iloc[selected_rows[0]]['Foundation']
         full  = full_name_map.get(short, short)
         if st.button(f"📋 Open {short} — Foundation Details", key="comparison_perf_nav"):
-            st.session_state._sidebar_nav    = 'Foundation Details'
+            st.session_state._pending_nav    = 'Foundation Details'
             st.session_state._nav_foundation = full
             st.rerun()
 
@@ -825,7 +825,11 @@ def show_financial_comparison(crm):
 
 def main():
     crm = FoundationCRM()
-    
+
+    # Resolve any pending navigation BEFORE widgets are instantiated
+    if '_pending_nav' in st.session_state:
+        st.session_state._sidebar_nav = st.session_state.pop('_pending_nav')
+
     # Sidebar navigation
     st.sidebar.title("🏛️ Louisiana Foundations CRM")
     _pages = ["Dashboard", "Foundation Directory", "Foundation Details", "Follow-ups",
