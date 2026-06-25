@@ -19,9 +19,9 @@ from _990_common import (
 
 DB_PATH = Path(__file__).parent / "database/louisiana_foundations.db"
 LOG_PATH = Path(__file__).parent / "logs/financial_coverage.txt"
-TARGET_YEARS = [2020, 2021, 2022, 2023, 2024]
-# 2024 index has XML_BATCH_ID; 2020–2023 require central-directory scanning
-BATCH_ID_YEARS = {2024}
+TARGET_YEARS = [2020, 2021, 2022, 2023, 2024, 2025, 2026]
+# 2024+ indexes have XML_BATCH_ID; 2020–2023 require central-directory scanning
+BATCH_ID_YEARS = {2024, 2025, 2026}
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -72,27 +72,48 @@ def parse_990_financials(xml_bytes: bytes) -> dict | None:
         log.warning("IRS990 element not found in XML")
         return None
 
-    pub_traded = _amt(body, 'InvestmentsPubliclyTradedSecAmt') or 0.0
-    other_sec  = _amt(body, 'InvestmentsOtherSecuritiesAmt') or 0.0
-    prog_rel   = _amt(body, 'InvestmentsProgramRelatedAmt') or 0.0
+    # Nested group helpers — capital gains, admin, fundraising live inside groups
+    def _grp_amt(parent, grp_tag, child_tag):
+        grp = parent.find(f'{{{ns}}}{grp_tag}')
+        if grp is None:
+            return None
+        val = _t(grp, child_tag)
+        if val:
+            try:
+                return float(val)
+            except ValueError:
+                pass
+        return None
+
+    # TotalFunctionalExpensesGrp holds the column totals for Part IX
+    fx_grp = body.find(f'{{{ns}}}TotalFunctionalExpensesGrp')
+    admin_exp      = _amt(fx_grp, 'ManagementAndGeneralAmt') if fx_grp is not None else None
+    fundraising    = _amt(fx_grp, 'FundraisingAmt') if fx_grp is not None else None
+
+    # Capital gains: Part VIII NetGainOrLossInvestmentsGrp/TotalRevenueColumnAmt
+    cap_gains = _grp_amt(body, 'NetGainOrLossInvestmentsGrp', 'TotalRevenueColumnAmt')
+
+    # Investment securities total from Schedule D
+    sched_d = root.find(f'{{{ns}}}ReturnData/{{{ns}}}IRS990ScheduleD')
+    inv_total = _amt(sched_d, 'TotalBookValueSecuritiesAmt') if sched_d is not None else None
 
     return {
-        'total_revenue':           _amt(body, 'TotalRevenueAmt'),
+        'total_revenue':           _amt(body, 'CYTotalRevenueAmt'),
         'contributions_received':  _amt(body, 'CYContributionsGrantsAmt', 'ContriGiftsGrantsEtc'),
         'program_service_revenue': _amt(body, 'CYProgramServiceRevenueAmt'),
         'investment_income':       _amt(body, 'CYInvestmentIncomeAmt'),
-        'capital_gains_losses':    _amt(body, 'NetGainLossFromSalesOfAssetsAmt'),
-        'total_expenses':          _amt(body, 'CYTotalExpensesAmt', 'TotalFunctionalExpensesAmt'),
-        'grants_paid':             _amt(body, 'CYGrantsAndSimilarAmountsPaidAmt'),
-        'administrative_expenses': _amt(body, 'CYMgmtAndGeneralExpensesAmt'),
-        'fundraising_expenses':    _amt(body, 'CYFundraisingExpensesAmt'),
+        'capital_gains_losses':    cap_gains,
+        'total_expenses':          _amt(body, 'CYTotalExpensesAmt'),
+        'grants_paid':             _amt(body, 'CYGrantsAndSimilarPaidAmt'),
+        'administrative_expenses': admin_exp,
+        'fundraising_expenses':    fundraising,
         'total_assets':            _amt(body, 'TotalAssetsEOYAmt'),
         'total_liabilities':       _amt(body, 'TotalLiabilitiesEOYAmt'),
         'net_assets_eoy':          _amt(body, 'NetAssetsOrFundBalancesEOYAmt'),
-        'investment_assets':       pub_traded + other_sec + prog_rel,
-        'securities_publicly_traded': pub_traded,
-        'securities_other':           other_sec,
-        'program_related_investments': prog_rel,
+        'investment_assets':       inv_total,
+        'securities_publicly_traded': inv_total,
+        'securities_other':           None,
+        'program_related_investments': None,
     }
 
 
@@ -163,26 +184,46 @@ def parse_990pf_financials(xml_bytes: bytes) -> dict | None:
         log.warning("IRS990PF element not found in XML")
         return None
 
-    dividends = _amt(body, 'DividendsAmt') or 0.0
-    interest   = _amt(body, 'InterestAmt') or 0.0
-    inv_sec    = _amt(body, 'InvstmntSecEOYAmt') or 0.0
+    # 990PF data lives inside named groups, not as direct children
+    rev   = body.find(f'{{{ns}}}AnalysisOfRevenueAndExpenses')
+    bal   = body.find(f'{{{ns}}}Form990PFBalanceSheetsGrp')
+    qdist = body.find(f'{{{ns}}}PFQualifyingDistributionsGrp')
+
+    def _ga(grp, *tags):
+        return _amt(grp, *tags) if grp is not None else None
+
+    # Investment assets: sum securities from balance sheet (book value)
+    inv_sec = 0.0
+    if bal is not None:
+        for tag in ('USGovernmentObligationsEOYAmt', 'CorporateStockEOYAmt',
+                    'CorporateBondsEOYAmt', 'OtherInvestmentsEOYAmt'):
+            inv_sec += _amt(bal, tag) or 0.0
+    inv_sec = inv_sec or None
+
+    # Investment income: interest + dividends (gross, from revenue column)
+    interest  = _ga(rev, 'InterestOnSavRevAndExpnssAmt') or 0.0
+    dividends = _ga(rev, 'DividendsRevAndExpnssAmt') or 0.0
+    inv_income = (interest + dividends) or None
+
+    stock = _ga(bal, 'CorporateStockEOYAmt')
+    bonds = (_ga(bal, 'CorporateBondsEOYAmt') or 0) + (_ga(bal, 'OtherInvestmentsEOYAmt') or 0)
 
     return {
-        'total_revenue':           _amt(body, 'TotalRevAndExpnssAmt', 'TotalRevenueAndExpensesAmt'),
-        'contributions_received':  _amt(body, 'TotContriPaidAmt', 'ContributionsReceivedAmt'),
+        'total_revenue':           _ga(rev, 'TotalRevAndExpnssAmt'),
+        'contributions_received':  _ga(rev, 'ContriRcvdRevAndExpnssAmt'),
         'program_service_revenue': None,
-        'investment_income':       dividends + interest,
-        'capital_gains_losses':    _amt(body, 'NetGainLossCapitalAmt', 'NetSTCapitalGainLossAmt'),
-        'total_expenses':          _amt(body, 'TotalExpensesPFAmt'),
-        'grants_paid':             _amt(body, 'QualifyingDistributionsAmt'),
+        'investment_income':       inv_income,
+        'capital_gains_losses':    _ga(rev, 'NetGainSaleAstRevAndExpnssAmt'),
+        'total_expenses':          _ga(rev, 'TotalExpensesRevAndExpnssAmt'),
+        'grants_paid':             _ga(qdist, 'QualifyingDistributionsAmt'),
         'administrative_expenses': None,
         'fundraising_expenses':    None,
-        'total_assets':            _amt(body, 'TotAssetsEOYAmt'),
-        'total_liabilities':       _amt(body, 'TotLiabilitiesEOYAmt'),
-        'net_assets_eoy':          _amt(body, 'TotNetAstOrFundBalancesEOYAmt'),
+        'total_assets':            _ga(bal, 'TotalAssetsEOYAmt'),
+        'total_liabilities':       _ga(bal, 'TotalLiabilitiesEOYAmt'),
+        'net_assets_eoy':          _ga(bal, 'TotNetAstOrFundBalancesEOYAmt'),
         'investment_assets':       inv_sec,
-        'securities_publicly_traded': inv_sec,
-        'securities_other':           None,
+        'securities_publicly_traded': stock,
+        'securities_other':           bonds or None,
         'program_related_investments': None,
     }
 
@@ -234,13 +275,26 @@ def ingest_year_with_batch_id(conn: sqlite3.Connection, ein_map: dict,
         try:
             from remotezip import RemoteZip
             with RemoteZip(zip_url) as rz:
+                # Detect actual folder prefix:
+                # - 2021: "2021Redo_allCycles/{obj}_public.xml"
+                # - 2022: "Cycles_.../{obj}_public.xml" or "{batch}/{obj}_public.xml"
+                # - 2025+: flat ZIP, "{obj}_public.xml" (no subdirectory)
+                first_names = rz.namelist()[:1]
+                if not first_names:
+                    prefix = batch + '/'
+                elif '/' in first_names[0]:
+                    prefix = first_names[0].split('/')[0] + '/'
+                else:
+                    prefix = ''  # flat ZIP
+                if prefix not in (batch + '/', ''):
+                    log.info(f"  Non-standard ZIP prefix detected: {prefix!r}")
                 for f in filings:
                     ein     = f['EIN']
                     obj_id  = f['OBJECT_ID']
                     period  = f['TAX_PERIOD']
                     ftype   = f['RETURN_TYPE']
                     filing_year = int(period[:4]) if period and len(period) >= 4 else year
-                    zip_path = f"{batch}/{obj_id}_public.xml"
+                    zip_path = f"{prefix}{obj_id}_public.xml"
                     try:
                         xml_bytes = rz.read(zip_path)
                     except KeyError:
@@ -287,13 +341,26 @@ def ingest_year_with_batch_scan(conn: sqlite3.Connection, ein_map: dict,
         try:
             from remotezip import RemoteZip
             with RemoteZip(zip_url) as rz:
+                # Detect actual folder prefix:
+                # - 2021: "2021Redo_allCycles/{obj}_public.xml"
+                # - 2022: "Cycles_.../{obj}_public.xml" or "{batch}/{obj}_public.xml"
+                # - 2025+: flat ZIP, "{obj}_public.xml" (no subdirectory)
+                first_names = rz.namelist()[:1]
+                if not first_names:
+                    prefix = batch + '/'
+                elif '/' in first_names[0]:
+                    prefix = first_names[0].split('/')[0] + '/'
+                else:
+                    prefix = ''  # flat ZIP
+                if prefix not in (batch + '/', ''):
+                    log.info(f"  Non-standard ZIP prefix detected: {prefix!r}")
                 for f in filings:
                     ein     = f['EIN']
                     obj_id  = f['OBJECT_ID']
                     period  = f['TAX_PERIOD']
                     ftype   = f['RETURN_TYPE']
                     filing_year = int(period[:4]) if period and len(period) >= 4 else year
-                    zip_path = f"{batch}/{obj_id}_public.xml"
+                    zip_path = f"{prefix}{obj_id}_public.xml"
                     try:
                         xml_bytes = rz.read(zip_path)
                     except KeyError:

@@ -4,6 +4,7 @@ Louisiana Foundations CRM Web Interface
 A Streamlit-based CRM system for managing foundation relationships and data.
 """
 
+import math
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -14,6 +15,29 @@ import os
 import io
 from pathlib import Path
 from src.new_functions import show_followups, show_compliance, show_centers_of_influence
+
+
+def _dollar_yaxis(series, allow_neg=False) -> dict:
+    """Plotly yaxis dict with human-readable $M/$B labels (avoids SI 'G' prefix)."""
+    s = pd.Series(series).dropna()
+    if s.empty or s.abs().max() == 0:
+        return dict(tickprefix='$', tickformat=',.0f')
+    mx = s.abs().max()
+    mn = s.min() if allow_neg else 0
+    unit = 1e9 if mx >= 5e8 else 1e6
+    suffix = 'B' if unit == 1e9 else 'M'
+    scaled_mx = mx / unit
+    mag = 10 ** math.floor(math.log10(scaled_mx))
+    step = next(m * mag for m in [0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10]
+                if 3 <= scaled_mx / (m * mag) <= 8)
+    lo = math.floor(mn / unit / step) * step
+    hi = math.ceil(scaled_mx / step + 1) * step
+    n = int(round((hi - lo) / step)) + 1
+    ticks = [round(lo + i * step, 10) for i in range(n)]
+    return dict(
+        tickvals=[t * unit for t in ticks],
+        ticktext=[f'${t:.3g}{suffix}' for t in ticks],
+    )
 
 def create_link_column(df, url_col, text, tooltip):
     """Create a column with clickable links."""
@@ -203,11 +227,13 @@ class FoundationCRM:
         placeholders_y = ','.join('?' * len(years))
         with self.get_connection() as conn:
             df = pd.read_sql_query(f"""
-                SELECT f.name, fh.foundation_id, fh.filing_year,
+                SELECT f.name, COALESCE(f.short_name, f.name) AS short_name,
+                       fh.foundation_id, fh.filing_year,
                        fh.total_assets, fh.investment_assets, fh.total_revenue,
                        fh.contributions_received, fh.investment_income,
                        fh.capital_gains_losses, fh.grants_paid, fh.net_assets_eoy,
-                       fh.total_liabilities,
+                       fh.total_liabilities, fh.administrative_expenses,
+                       fh.total_expenses,
                        CASE WHEN fh.total_assets > 0
                             THEN fh.grants_paid / fh.total_assets * 100
                             ELSE NULL END AS grant_payout_ratio
@@ -284,14 +310,14 @@ class FoundationCRM:
 
 def show_financial_history_tab(crm, foundation_id: int):
     fh, inv = crm.load_financial_history(foundation_id)
-    all_years = list(range(2020, 2025))
+    all_years = list(range(2020, 2026))
 
     # ── Coverage row ────────────────────────────────────────────────────────
     st.subheader("Data Coverage")
     years_with_data = set(fh['filing_year'].tolist()) if not fh.empty else set()
     missing = [y for y in all_years if y not in years_with_data]
 
-    cols = st.columns(5)
+    cols = st.columns(len(all_years))
     for i, year in enumerate(all_years):
         with cols[i]:
             if year in years_with_data:
@@ -308,6 +334,10 @@ def show_financial_history_tab(crm, foundation_id: int):
                    "Run `ingest_990_financials.py` to populate real data.")
         return
 
+    # Shared x-axis config: always show 2020-2025 so gaps are visible
+    _xaxis = dict(tickmode='array', tickvals=all_years,
+                  range=[2019.5, 2025.5], dtick=1)
+
     # ── YoY: Assets ─────────────────────────────────────────────────────────
     st.subheader("Assets Over Time")
     fig = go.Figure()
@@ -317,8 +347,8 @@ def show_financial_history_tab(crm, foundation_id: int):
     fig.add_trace(go.Scatter(x=fh['filing_year'], y=fh['investment_assets'],
                              mode='lines+markers', name='Investment Assets',
                              connectgaps=False))
-    fig.update_layout(yaxis_tickprefix='$', yaxis_tickformat=',.0f',
-                      xaxis=dict(tickmode='array', tickvals=all_years),
+    _assets = pd.concat([fh['total_assets'], fh['investment_assets']])
+    fig.update_layout(yaxis=_dollar_yaxis(_assets), xaxis=_xaxis,
                       height=300, margin=dict(t=20, b=20))
     st.plotly_chart(fig, use_container_width=True)
 
@@ -334,15 +364,14 @@ def show_financial_history_tab(crm, foundation_id: int):
     # ── YoY: Revenue breakdown ───────────────────────────────────────────────
     st.subheader("Revenue Breakdown")
     fig2 = go.Figure()
-    for col, label in [('contributions_received', 'Contributions'),
-                        ('investment_income',      'Investment Income'),
-                        ('program_service_revenue','Program Service Revenue')]:
+    rev_cols = ['contributions_received', 'investment_income', 'program_service_revenue']
+    for col, label in zip(rev_cols, ['Contributions', 'Investment Income', 'Program Svc Revenue']):
         if col in fh.columns:
             fig2.add_trace(go.Scatter(x=fh['filing_year'], y=fh[col],
                                       mode='lines+markers', name=label,
                                       connectgaps=False))
-    fig2.update_layout(yaxis_tickprefix='$', yaxis_tickformat=',.0f',
-                       xaxis=dict(tickmode='array', tickvals=all_years),
+    _rev = pd.concat([fh[c] for c in rev_cols if c in fh.columns])
+    fig2.update_layout(yaxis=_dollar_yaxis(_rev), xaxis=_xaxis,
                        height=300, margin=dict(t=20, b=20))
     st.plotly_chart(fig2, use_container_width=True)
 
@@ -354,9 +383,8 @@ def show_financial_history_tab(crm, foundation_id: int):
         fig3 = go.Figure(go.Bar(x=fh['filing_year'], y=fh['capital_gains_losses'],
                                 marker_color=colors, name='Capital Gains/Losses'))
         fig3.add_hline(y=0, line_dash='dash', line_color='gray')
-        fig3.update_layout(yaxis_tickprefix='$', yaxis_tickformat=',.0f',
-                           xaxis=dict(tickmode='array', tickvals=all_years),
-                           height=280, margin=dict(t=20, b=20))
+        fig3.update_layout(yaxis=_dollar_yaxis(fh['capital_gains_losses'], allow_neg=True),
+                           xaxis=_xaxis, height=280, margin=dict(t=20, b=20))
         st.plotly_chart(fig3, use_container_width=True)
     else:
         st.info("Capital gains/losses data not available.")
@@ -369,10 +397,11 @@ def show_financial_history_tab(crm, foundation_id: int):
     payout = (fh['grants_paid'] / fh['total_assets'] * 100).where(fh['total_assets'] > 0)
     fig4.add_trace(go.Scatter(x=fh['filing_year'], y=payout, mode='lines+markers',
                               name='Payout %', yaxis='y2'))
+    _grants_yfmt = {**_dollar_yaxis(fh['grants_paid']), 'title': 'Grants Paid'}
     fig4.update_layout(
-        yaxis=dict(tickprefix='$', tickformat=',.0f', title='Grants Paid'),
+        yaxis=_grants_yfmt,
         yaxis2=dict(ticksuffix='%', overlaying='y', side='right', title='Payout %'),
-        xaxis=dict(tickmode='array', tickvals=all_years),
+        xaxis=_xaxis,
         height=300, margin=dict(t=20, b=20), legend=dict(orientation='h')
     )
     st.plotly_chart(fig4, use_container_width=True)
@@ -394,6 +423,114 @@ def show_financial_history_tab(crm, foundation_id: int):
             fig5.update_layout(height=280, margin=dict(t=20, b=20))
             st.plotly_chart(fig5, use_container_width=True)
 
+    # ── Performance Analysis table ────────────────────────────────────────────
+    st.subheader("Performance Analysis")
+    perf_rows = []
+    fh_sorted = fh.sort_values('filing_year').reset_index(drop=True)
+    for i, row in fh_sorted.iterrows():
+        yr        = int(row['filing_year'])
+        end       = row.get('total_assets')
+        begin     = fh_sorted.loc[i - 1, 'total_assets'] if i > 0 else None
+        inv_a     = row.get('investment_assets')  # Schedule D securities total
+        # Use Schedule D assets only when they represent ≥60% of total (likely comprehensive).
+        # Otherwise use total_assets — Schedule D is a partial view for many foundations.
+        inv_a_ok  = pd.notna(inv_a) and inv_a and inv_a > 0 and pd.notna(end) and end and (inv_a / end) >= 0.6
+        denom     = inv_a if inv_a_ok else end
+        contribs  = row.get('contributions_received')
+        grants    = row.get('grants_paid')
+        inc       = row.get('investment_income')
+        cap       = row.get('capital_gains_losses')
+        admin     = row.get('administrative_expenses')
+        total_exp = row.get('total_expenses')
+        total_rev = row.get('total_revenue')
+
+        def _pct(num, den):
+            if pd.notna(num) and pd.notna(den) and den and den != 0:
+                return num / den * 100
+            return None
+
+        net_flows  = (contribs - grants) if (pd.notna(contribs) and pd.notna(grants)) else None
+        raw_chg    = _pct(end - begin, begin) if (pd.notna(begin) and begin and pd.notna(end)) else None
+
+        # Modified Dietz: strips external cash flows from apparent asset change
+        if pd.notna(begin) and begin and pd.notna(end) and net_flows is not None:
+            md_denom = begin + 0.5 * net_flows
+            mod_dietz = _pct(end - begin - net_flows, md_denom) if md_denom else None
+        else:
+            mod_dietz = None
+
+        income_yield = _pct(inc, denom)
+        cap_return   = _pct(cap, denom)
+        total_ret    = (
+            (income_yield or 0) + (cap_return or 0)
+            if (income_yield is not None or cap_return is not None) else None
+        )
+        payout       = _pct(grants, end)
+        overhead     = _pct(admin, total_exp)
+        contrib_dep  = _pct(contribs, total_rev)
+
+        perf_rows.append({
+            'Year':               yr,
+            'Total Assets':       end,
+            'Asset Δ %':          raw_chg,
+            'Net Flows':          net_flows,
+            'Mod. Dietz %':       mod_dietz,
+            'Income Yield %':     income_yield,
+            'Cap. Return %':      cap_return,
+            'Total Return %':     total_ret,
+            'Payout Ratio %':     payout,
+            'Overhead %':         overhead,
+            'Contrib. Dep. %':    contrib_dep,
+        })
+
+    perf = pd.DataFrame(perf_rows).set_index('Year')
+
+    def _fmt_dollar(v):
+        if pd.isna(v) or v is None: return '—'
+        sign = '-' if v < 0 else ''
+        av = abs(v)
+        if av >= 1e9: return f'{sign}${av/1e9:.2f}B'
+        if av >= 1e6: return f'{sign}${av/1e6:.1f}M'
+        return f'{sign}${av:,.0f}'
+
+    def _fmt_pct(v):
+        if pd.isna(v) or v is None: return '—'
+        return f"{v:+.1f}%"
+
+    def _fmt_pct_plain(v):
+        if pd.isna(v) or v is None: return '—'
+        return f"{v:.1f}%"
+
+    pct_sign_cols = ['Asset Δ %', 'Mod. Dietz %', 'Income Yield %',
+                     'Cap. Return %', 'Total Return %']
+    pct_plain_cols = ['Payout Ratio %', 'Overhead %', 'Contrib. Dep. %']
+
+    display = perf.copy()
+    display['Total Assets'] = display['Total Assets'].apply(_fmt_dollar)
+    display['Net Flows']    = display['Net Flows'].apply(_fmt_dollar)
+    for c in pct_sign_cols:
+        display[c] = display[c].apply(_fmt_pct)
+    for c in pct_plain_cols:
+        display[c] = display[c].apply(_fmt_pct_plain)
+
+    def _color_signed(v):
+        if isinstance(v, str) and v.startswith('+'):
+            return 'color: #27ae60; font-weight: bold'
+        if isinstance(v, str) and v.startswith('-'):
+            return 'color: #e74c3c; font-weight: bold'
+        return ''
+
+    styled = display.style.applymap(_color_signed, subset=pct_sign_cols)
+    st.dataframe(styled, use_container_width=True)
+    st.caption(
+        "**Modified Dietz** adjusts for contributions received and grants paid at period midpoint, "
+        "isolating investment performance from external cash flows. "
+        "**Income Yield** and **Cap. Return** denominator: Schedule D investment assets when they "
+        "represent ≥60% of total assets (portfolio appears comprehensive); otherwise total assets. "
+        "**Overhead** = admin expenses ÷ total expenses. "
+        "**Contrib. Dep.** = contributions ÷ total revenue."
+    )
+
 
 COMPARISON_METRICS = {
     'Total Assets':         'total_assets',
@@ -414,9 +551,9 @@ def show_financial_comparison(crm):
     metric_label = st.sidebar.selectbox("Metric", list(COMPARISON_METRICS.keys()))
     metric_col   = COMPARISON_METRICS[metric_label]
 
-    all_years = list(range(2020, 2025))
+    all_years = list(range(2020, 2026))
     year_range = st.sidebar.select_slider(
-        "Year Range", options=all_years, value=(2020, 2024)
+        "Year Range", options=all_years, value=(2020, 2025)
     )
     selected_years = list(range(year_range[0], year_range[1] + 1))
 
@@ -452,9 +589,10 @@ def show_financial_comparison(crm):
         st.subheader(f"{metric_label} — {year}")
 
         # Build full roster including foundations with no data
-        snapshot = df[df['filing_year'] == year][['name', metric_col]].copy()
+        snap_src = df[df['filing_year'] == year][['name', 'short_name', metric_col]].copy()
         all_names_df = pd.DataFrame({'name': selected_names})
-        snapshot = all_names_df.merge(snapshot, on='name', how='left')
+        snapshot = all_names_df.merge(snap_src, on='name', how='left')
+        snapshot['short_name'] = snapshot['short_name'].fillna(snapshot['name'])
         snapshot = snapshot.sort_values(metric_col, ascending=True, na_position='first')
 
         is_pct = 'ratio' in metric_col or 'pct' in metric_col
@@ -465,41 +603,44 @@ def show_financial_comparison(crm):
         )
 
         fig = go.Figure(go.Bar(
-            x=snapshot[metric_col], y=snapshot['name'],
+            x=snapshot[metric_col], y=snapshot['short_name'],
             orientation='h', marker_color=colors,
             hovertext=hover, hoverinfo='text+y'
         ))
-        tick_fmt = '.1f' if is_pct else ',.0f'
-        tick_prefix = '' if is_pct else '$'
-        tick_suffix = '%' if is_pct else ''
+        if is_pct:
+            xaxis_fmt = dict(tickformat='.1f', ticksuffix='%')
+        else:
+            xaxis_fmt = _dollar_yaxis(snapshot[metric_col])
         fig.update_layout(
-            xaxis=dict(tickformat=tick_fmt, tickprefix=tick_prefix, ticksuffix=tick_suffix),
+            xaxis=xaxis_fmt,
             height=max(400, len(selected_names) * 22),
-            margin=dict(l=200, t=20, b=40)
+            margin=dict(l=150, t=20, b=40)
         )
         st.plotly_chart(fig, use_container_width=True)
 
     else:
         st.subheader(f"{metric_label} — {selected_years[0]}–{selected_years[-1]}")
 
+        is_pct = 'ratio' in metric_col or 'pct' in metric_col
         fig = go.Figure()
         for name in selected_names:
             fdata = df[df['name'] == name].sort_values('filing_year')
+            short = fdata['short_name'].iloc[0] if not fdata.empty else name
             n_years = fdata['filing_year'].nunique()
             completeness = f"{n_years}/{len(selected_years)} yrs"
             fig.add_trace(go.Scatter(
                 x=fdata['filing_year'], y=fdata[metric_col],
-                mode='lines+markers', name=f"{name} ({completeness})",
+                mode='lines+markers', name=f"{short} ({completeness})",
                 connectgaps=False
             ))
-        is_pct = 'ratio' in metric_col or 'pct' in metric_col
+        if is_pct:
+            yaxis_fmt = dict(tickformat='.1f', ticksuffix='%')
+        else:
+            yaxis_fmt = _dollar_yaxis(df[metric_col])
         fig.update_layout(
-            yaxis=dict(
-                tickformat='.1f' if is_pct else ',.0f',
-                tickprefix='' if is_pct else '$',
-                ticksuffix='%' if is_pct else ''
-            ),
-            xaxis=dict(tickmode='array', tickvals=selected_years),
+            yaxis=yaxis_fmt,
+            xaxis=dict(tickmode='array', tickvals=selected_years,
+                       range=[min(selected_years) - 0.5, max(selected_years) + 0.5]),
             height=450, margin=dict(t=20, b=20),
             legend=dict(orientation='v', x=1.01)
         )
@@ -536,16 +677,163 @@ def show_financial_comparison(crm):
             mime='text/csv'
         )
 
+    # ── Performance Analysis ──────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Performance Analysis")
+
+    avail_years = sorted(df['filing_year'].dropna().unique().astype(int), reverse=True)
+    if not avail_years:
+        st.info("No data available for the selected foundations and years.")
+        return
+
+    perf_year = st.selectbox(
+        "Year", options=avail_years, key='comparison_perf_year',
+        help="Metrics computed for this tax year. Modified Dietz uses prior year as starting value."
+    )
+
+    # Load prior year outside the selected range if needed
+    prior_year = perf_year - 1
+    if prior_year in [row for row in df['filing_year'].unique()]:
+        prior_df = df[df['filing_year'] == prior_year]
+    else:
+        prior_df = crm.load_comparison_data(selected_ids, [prior_year])
+
+    curr_df = df[df['filing_year'] == perf_year]
+
+    def _p(num, den):
+        if pd.notna(num) and pd.notna(den) and den and den != 0:
+            return num / den * 100
+        return None
+
+    perf_rows = []
+    full_name_map = {}  # short_name -> full name (for navigation)
+    for _, curr in curr_df.iterrows():
+        name  = curr['name']
+        short = curr['short_name']
+        full_name_map[short] = name
+        prior = prior_df[prior_df['name'] == name]
+        begin = prior['total_assets'].iloc[0] if not prior.empty else None
+
+        end       = curr['total_assets']
+        inv_a     = curr['investment_assets']
+        inv_ok    = pd.notna(inv_a) and inv_a and inv_a > 0 and pd.notna(end) and end and (inv_a / end) >= 0.6
+        denom     = inv_a if inv_ok else end
+        contribs  = curr['contributions_received']
+        grants    = curr['grants_paid']
+        inc       = curr['investment_income']
+        cap       = curr['capital_gains_losses']
+        admin     = curr['administrative_expenses']
+        total_exp = curr['total_expenses']
+        total_rev = curr['total_revenue']
+
+        net_flows = (contribs - grants) if (pd.notna(contribs) and pd.notna(grants)) else None
+        raw_chg   = _p(end - begin, begin) if (pd.notna(begin) and begin and pd.notna(end)) else None
+
+        if pd.notna(begin) and begin and pd.notna(end) and net_flows is not None:
+            md_d = begin + 0.5 * net_flows
+            mod_dietz = _p(end - begin - net_flows, md_d) if md_d else None
+        else:
+            mod_dietz = None
+
+        income_yield = _p(inc, denom)
+        cap_return   = _p(cap, denom)
+        total_ret    = (
+            (income_yield or 0) + (cap_return or 0)
+            if (income_yield is not None or cap_return is not None) else None
+        )
+
+        perf_rows.append({
+            'Foundation':       short,
+            'Total Assets':     end,
+            'Asset Δ %':        raw_chg,
+            'Mod. Dietz %':     mod_dietz,
+            'Income Yield %':   income_yield,
+            'Cap. Return %':    cap_return,
+            'Total Return %':   total_ret,
+            'Net Flows':        net_flows,
+            'Payout Ratio %':   _p(grants, end),
+            'Overhead %':       _p(admin, total_exp),
+            'Contrib. Dep. %':  _p(contribs, total_rev),
+        })
+
+    if not perf_rows:
+        st.info(f"No data for {perf_year}.")
+        return
+
+    perf = pd.DataFrame(perf_rows)
+
+    def _fd(v):
+        if pd.isna(v) or v is None: return None
+        sign = '-' if v < 0 else ''
+        av = abs(v)
+        if av >= 1e9: return f'{sign}${av/1e9:.2f}B'
+        if av >= 1e6: return f'{sign}${av/1e6:.1f}M'
+        return f'{sign}${av:,.0f}'
+
+    def _fp(v, signed=True):
+        if pd.isna(v) or v is None: return None
+        return f"{v:+.1f}%" if signed else f"{v:.1f}%"
+
+    sign_cols  = ['Asset Δ %', 'Mod. Dietz %', 'Income Yield %', 'Cap. Return %', 'Total Return %']
+    plain_cols = ['Payout Ratio %', 'Overhead %', 'Contrib. Dep. %']
+
+    display = perf.copy()
+    display['Total Assets'] = display['Total Assets'].apply(_fd)
+    display['Net Flows']    = display['Net Flows'].apply(_fd)
+    for c in sign_cols:
+        display[c] = display[c].apply(_fp)
+    for c in plain_cols:
+        display[c] = display[c].apply(lambda v: _fp(v, signed=False))
+
+    def _color(v):
+        if isinstance(v, str) and v.startswith('+'):
+            return 'color: #27ae60; font-weight: bold'
+        if isinstance(v, str) and v.startswith('-'):
+            return 'color: #e74c3c; font-weight: bold'
+        return ''
+
+    styled = display.style.applymap(_color, subset=sign_cols)
+    sel = st.dataframe(
+        styled,
+        use_container_width=True,
+        hide_index=True,
+        selection_mode="single-row",
+        on_select="rerun",
+        key="comparison_perf_table",
+    )
+    st.caption(
+        f"**{perf_year}** performance. Click a row to select, then open foundation details. "
+        "Click any column header to sort. "
+        "**Mod. Dietz** strips contributions and grants at midpoint. "
+        "Income/Cap. Return use Schedule D assets when ≥60% of total; otherwise total assets. "
+        "**Contrib. Dep.** = contributions ÷ total revenue."
+    )
+
+    selected_rows = sel.selection.rows
+    if selected_rows:
+        short = perf.iloc[selected_rows[0]]['Foundation']
+        full  = full_name_map.get(short, short)
+        if st.button(f"📋 Open {short} — Foundation Details", key="comparison_perf_nav"):
+            st.session_state._sidebar_nav    = 'Foundation Details'
+            st.session_state._nav_foundation = full
+            st.rerun()
+
+    perf_csv = perf.to_csv(index=False).encode()
+    st.download_button("⬇ Download Performance CSV", perf_csv,
+                       file_name=f"performance_{perf_year}.csv", mime='text/csv')
+
 
 def main():
     crm = FoundationCRM()
     
     # Sidebar navigation
     st.sidebar.title("🏛️ Louisiana Foundations CRM")
-    page = st.sidebar.selectbox(
-        "Navigate",
-        ["Dashboard", "Foundation Directory", "Foundation Details", "Follow-ups", "Compliance", "Centers of Influence", "Add Interaction", "Data Management", "📊 Financial Comparison"]
-    )
+    _pages = ["Dashboard", "Foundation Directory", "Foundation Details", "Follow-ups",
+              "Compliance", "Centers of Influence", "Add Interaction", "Data Management",
+              "📊 Financial Comparison"]
+    if '_sidebar_nav' not in st.session_state:
+        st.session_state._sidebar_nav = 'Dashboard'
+    page = st.sidebar.selectbox("Navigate", _pages, key='_sidebar_nav')
     
     if page == "Dashboard":
         show_dashboard(crm)
@@ -771,12 +1059,20 @@ def show_foundation_details(crm):
             st.warning("No foundation data available.")
             return
         
-        foundation_options = {f"{row.name} ({row.city})": row.id 
+        foundation_options = {f"{row.name} ({row.city})": row.id
                             for _, row in df.itertuples(index=False)}
-        
+
+        nav_f = st.session_state.pop('_nav_foundation', None)
+        if nav_f:
+            for k in foundation_options.keys():
+                if nav_f.lower() in k.lower():
+                    st.session_state['_detail_foundation'] = k
+                    break
+
         selected_name = st.selectbox(
             "Select Foundation",
-            options=list(foundation_options.keys())
+            options=list(foundation_options.keys()),
+            key='_detail_foundation',
         )
         
         if selected_name:
