@@ -1544,7 +1544,6 @@ def show_retirement_systems(crm):
         st.info("No retirement systems found. Run migrate_add_retirement_systems.py to seed data.")
         return
 
-    # ── Summary table ──────────────────────────────────────────────────────────
     def fmt_assets(v):
         if v is None or (isinstance(v, float) and v != v):
             return "—"
@@ -1552,201 +1551,331 @@ def show_retirement_systems(crm):
             return f"${v/1e9:.1f}B"
         return f"${v/1e6:.0f}M"
 
-    def fmt_pct(v):
+    def fmt_pct(v, decimals=1):
         if v is None or (isinstance(v, float) and v != v):
             return "—"
-        return f"{v:.1f}%"
+        return f"{v:.{decimals}f}%"
 
+    # ── Summary table ──────────────────────────────────────────────────────────
     summary = systems_df[[
         "abbreviation", "name", "system_type",
         "total_assets", "asset_data_year", "funded_ratio",
         "active_members", "retired_members",
         "investment_consultant", "executive_director",
     ]].copy()
-    summary["AUM"] = summary["total_assets"].apply(fmt_assets)
-    summary["Funded"] = summary["funded_ratio"].apply(fmt_pct)
-    summary["Active"] = summary["active_members"].apply(
-        lambda v: f"{int(v):,}" if v and v == v else "—"
-    )
-    summary["Retired"] = summary["retired_members"].apply(
-        lambda v: f"{int(v):,}" if v and v == v else "—"
-    )
-    summary["FY"] = summary["asset_data_year"].apply(
-        lambda v: str(int(v)) if v and v == v else "—"
-    )
-    summary["Type"] = summary["system_type"].str.title()
+    summary["AUM"]        = summary["total_assets"].apply(fmt_assets)
+    summary["Funded"]     = summary["funded_ratio"].apply(fmt_pct)
+    summary["Active"]     = summary["active_members"].apply(
+        lambda v: f"{int(v):,}" if v and v == v else "—")
+    summary["FY"]         = summary["asset_data_year"].apply(
+        lambda v: str(int(v)) if v and v == v else "—")
+    summary["Type"]       = summary["system_type"].str.title()
     summary["Consultant"] = summary["investment_consultant"].fillna("—")
-    summary["Director"] = summary["executive_director"].fillna("—")
+    summary["Director"]   = summary["executive_director"].fillna("—")
 
     display_cols = {
-        "abbreviation": "Abbrev.",
-        "name": "System Name",
-        "Type": "Type",
-        "AUM": "Total Assets",
-        "FY": "As Of",
-        "Funded": "Funded Ratio",
-        "Active": "Active Members",
-        "Consultant": "Inv. Consultant",
+        "abbreviation": "Abbrev.", "name": "System Name", "Type": "Type",
+        "AUM": "Total Assets", "FY": "As Of", "Funded": "Funded Ratio",
+        "Active": "Active Members", "Consultant": "Inv. Consultant",
         "Director": "Exec. Director",
     }
-    table_df = summary.rename(columns={"abbreviation": "Abbrev.", "name": "System Name"})[
-        list(display_cols.values())
-    ]
+    table_df = summary[list(display_cols.keys())].rename(columns=display_cols)
 
     st.markdown("### All Systems")
     sel = st.dataframe(
-        table_df,
-        use_container_width=True,
-        hide_index=True,
-        selection_mode="single-row",
-        on_select="rerun",
-        key="rs_summary_table",
+        table_df, use_container_width=True, hide_index=True,
+        selection_mode="single-row", on_select="rerun", key="rs_summary_table",
     )
 
-    # ── Quick-stat bar ─────────────────────────────────────────────────────────
+    # ── Aggregate metrics ──────────────────────────────────────────────────────
     known_aum = systems_df["total_assets"].dropna()
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Systems Tracked", len(systems_df))
-    c2.metric("Known AUM", fmt_assets(known_aum.sum()) if len(known_aum) else "—")
-    c3.metric("Systems with AUM Data", int(known_aum.count()))
+    c2.metric("Total Known AUM", fmt_assets(known_aum.sum()) if len(known_aum) else "—")
+    c3.metric("Systems w/ AUM", int(known_aum.count()))
+    funded = systems_df["funded_ratio"].dropna()
+    c4.metric("Avg Funded Ratio", f"{funded.mean():.1f}%" if len(funded) else "—")
 
-    # ── AUM bar chart ──────────────────────────────────────────────────────────
+    # ── AUM + Funded Ratio side-by-side charts ─────────────────────────────────
     chart_df = systems_df[systems_df["total_assets"].notna()].copy()
     chart_df = chart_df.sort_values("total_assets", ascending=True)
-    if not chart_df.empty:
-        fig = px.bar(
-            chart_df,
-            x="total_assets",
-            y="abbreviation",
-            orientation="h",
-            color="system_type",
-            title="Total Assets by System",
-            labels={"total_assets": "Total Assets", "abbreviation": ""},
-            color_discrete_map={
-                "statewide": "#1f77b4",
-                "parochial": "#ff7f0e",
-                "municipal": "#2ca02c",
-                "specialty": "#9467bd",
-            },
-        )
-        fig.update_xaxes(**_dollar_yaxis(chart_df["total_assets"]))
-        fig.update_layout(height=350, showlegend=True, legend_title="Type",
-                          margin=dict(l=0, r=10, t=40, b=0))
-        st.plotly_chart(fig, use_container_width=True)
 
-    # ── Detail panel for selected row ─────────────────────────────────────────
+    col_left, col_right = st.columns([3, 2])
+    with col_left:
+        if not chart_df.empty:
+            fig = px.bar(
+                chart_df, x="total_assets", y="abbreviation", orientation="h",
+                color="system_type", title="Total Assets by System",
+                labels={"total_assets": "", "abbreviation": ""},
+                color_discrete_map={
+                    "statewide": "#1f77b4", "parochial": "#ff7f0e",
+                    "municipal": "#2ca02c", "specialty": "#9467bd",
+                },
+            )
+            fig.update_xaxes(**_dollar_yaxis(chart_df["total_assets"]))
+            fig.update_layout(height=300, showlegend=False,
+                              margin=dict(l=0, r=10, t=40, b=0))
+            st.plotly_chart(fig, use_container_width=True)
+
+    with col_right:
+        funded_df = systems_df[systems_df["funded_ratio"].notna()].copy()
+        funded_df = funded_df.sort_values("funded_ratio", ascending=True)
+        if not funded_df.empty:
+            funded_df["color"] = funded_df["funded_ratio"].apply(
+                lambda v: "#2ca02c" if v >= 90 else ("#ff7f0e" if v >= 70 else "#d62728")
+            )
+            fig2 = px.bar(
+                funded_df, x="funded_ratio", y="abbreviation", orientation="h",
+                title="Funded Ratio (%)",
+                labels={"funded_ratio": "", "abbreviation": ""},
+                color="color", color_discrete_map="identity",
+            )
+            fig2.add_vline(x=70, line_dash="dash", line_color="gray", annotation_text="70%")
+            fig2.add_vline(x=100, line_dash="dash", line_color="green", annotation_text="100%")
+            fig2.update_layout(height=300, showlegend=False,
+                               margin=dict(l=0, r=10, t=40, b=0))
+            st.plotly_chart(fig2, use_container_width=True)
+
+    # ── Detail panel ───────────────────────────────────────────────────────────
     selected_rows = sel.selection.rows
     if not selected_rows:
         st.info("Select a row above to see system details.")
         return
 
     sys_row = systems_df.iloc[selected_rows[0]]
-    sys_id = int(sys_row["id"])
+    sys_id  = int(sys_row["id"])
+    abbr    = sys_row["abbreviation"]
 
     st.divider()
-    st.subheader(f"📋 {sys_row['name']} ({sys_row['abbreviation']})")
+    st.subheader(f"📋 {sys_row['name']} ({abbr})")
 
-    # Basic info
-    info_col, fin_col = st.columns([1, 1])
-    with info_col:
-        st.markdown("**Organization**")
-        fields = [
-            ("Type", sys_row.get("system_type", "").title()),
-            ("Website", f"[{sys_row['website']}]({sys_row['website']})" if sys_row.get("website") else "—"),
-            ("Phone", sys_row.get("phone") or "—"),
-            ("City", sys_row.get("city") or "—"),
-            ("Fiscal Year End", sys_row.get("fiscal_year_end") or "—"),
-        ]
-        for label, val in fields:
-            st.markdown(f"**{label}:** {val}")
-
-    with fin_col:
-        st.markdown("**Investment / Financial**")
-        fields2 = [
-            ("Total Assets", fmt_assets(sys_row.get("total_assets"))),
-            ("Funded Ratio", fmt_pct(sys_row.get("funded_ratio"))),
-            ("Inv. Consultant", sys_row.get("investment_consultant") or "—"),
-            ("Actuary", sys_row.get("actuary") or "—"),
-            ("Custodian", sys_row.get("custodian") or "—"),
-            ("CIO", sys_row.get("cio") or "—"),
-        ]
-        for label, val in fields2:
-            st.markdown(f"**{label}:** {val}")
-
-    if sys_row.get("notes"):
-        st.caption(sys_row["notes"])
-
-    # Financial history
     try:
         with crm.get_connection() as conn:
             fin_df = pd.read_sql_query(
-                "SELECT * FROM system_financials WHERE system_id = ? ORDER BY fiscal_year DESC",
-                conn,
-                params=[sys_id],
+                "SELECT * FROM system_financials WHERE system_id=? ORDER BY fiscal_year DESC",
+                conn, params=[sys_id],
             )
             personnel_df = pd.read_sql_query(
-                "SELECT * FROM system_personnel WHERE system_id = ? ORDER BY role_type, name",
-                conn,
-                params=[sys_id],
+                "SELECT * FROM system_personnel WHERE system_id=? ORDER BY role_type, name",
+                conn, params=[sys_id],
+            )
+            mgr_df = pd.read_sql_query(
+                "SELECT * FROM system_managers WHERE system_id=? ORDER BY asset_class, manager_name",
+                conn, params=[sys_id],
             )
     except Exception as e:
         st.error(f"Error loading details: {e}")
         return
 
-    if not fin_df.empty:
-        st.markdown("#### Financial History")
-        fin_display = fin_df.copy()
-        for col in ["total_assets", "actuarial_liability", "employer_contributions",
-                    "employee_contributions", "benefits_paid"]:
-            if col in fin_display.columns:
-                fin_display[col] = fin_display[col].apply(fmt_assets)
-        for col in ["funded_ratio", "investment_return_pct",
-                    "equity_pct", "fixed_income_pct", "alternatives_pct",
-                    "real_estate_pct", "cash_pct"]:
-            if col in fin_display.columns:
-                fin_display[col] = fin_display[col].apply(fmt_pct)
-        for col in ["active_members", "retired_members"]:
-            if col in fin_display.columns:
-                fin_display[col] = fin_display[col].apply(
-                    lambda v: f"{int(v):,}" if v and v == v else "—"
+    # ── Overview row ───────────────────────────────────────────────────────────
+    info_col, fin_col = st.columns(2)
+    with info_col:
+        st.markdown("**Organization**")
+        for label, val in [
+            ("Type",           sys_row.get("system_type", "").title()),
+            ("Website",        f"[{sys_row['website']}]({sys_row['website']})" if sys_row.get("website") else "—"),
+            ("Phone",          sys_row.get("phone") or "—"),
+            ("Fiscal Year End",sys_row.get("fiscal_year_end") or "—"),
+            ("Exec. Director", sys_row.get("executive_director") or "—"),
+        ]:
+            st.markdown(f"**{label}:** {val}")
+
+    with fin_col:
+        st.markdown("**Investment Profile**")
+        for label, val in [
+            ("Total Assets",   fmt_assets(sys_row.get("total_assets"))),
+            ("Funded Ratio",   fmt_pct(sys_row.get("funded_ratio"))),
+            ("Inv. Consultant",sys_row.get("investment_consultant") or "—"),
+            ("Actuary",        sys_row.get("actuary") or "—"),
+            ("Custodian",      sys_row.get("custodian") or "—"),
+            ("CIO",            sys_row.get("cio") or "—"),
+        ]:
+            st.markdown(f"**{label}:** {val}")
+
+    if sys_row.get("notes"):
+        st.caption(sys_row["notes"])
+
+    # ── Tabs: Performance | Allocation | Managers | Leadership | Edit ──────────
+    tab_perf, tab_alloc, tab_mgr, tab_board, tab_edit = st.tabs(
+        ["📈 Performance", "🥧 Allocation", "🏢 Managers", "👥 Leadership", "✏️ Edit"]
+    )
+
+    # ── Performance tab ────────────────────────────────────────────────────────
+    with tab_perf:
+        if fin_df.empty:
+            st.info("No financial history data yet.")
+        else:
+            # Returns summary metrics (most recent year)
+            latest = fin_df.iloc[0]
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Total Assets", fmt_assets(latest.get("total_assets")))
+            m2.metric("Funded Ratio", fmt_pct(latest.get("funded_ratio")))
+            m3.metric("1-Yr Return",  fmt_pct(latest.get("investment_return_pct")))
+            m4.metric("3-Yr Return",  fmt_pct(latest.get("return_3yr")))
+            m5.metric("10-Yr Return", fmt_pct(latest.get("return_10yr")))
+
+            # AUM history chart
+            aum_hist = fin_df[fin_df["total_assets"].notna()].sort_values("fiscal_year")
+            if len(aum_hist) > 1:
+                fig3 = px.line(
+                    aum_hist, x="fiscal_year", y="total_assets",
+                    title="AUM History", markers=True,
+                    labels={"fiscal_year": "Fiscal Year", "total_assets": ""},
                 )
-        cols_show = [c for c in [
-            "fiscal_year", "total_assets", "funded_ratio", "investment_return_pct",
-            "active_members", "retired_members",
-            "equity_pct", "fixed_income_pct", "alternatives_pct",
-        ] if c in fin_display.columns]
-        rename_map = {
-            "fiscal_year": "Fiscal Year", "total_assets": "Total Assets",
-            "funded_ratio": "Funded %", "investment_return_pct": "Return %",
-            "active_members": "Active", "retired_members": "Retired",
-            "equity_pct": "Equity %", "fixed_income_pct": "Fixed Inc %",
-            "alternatives_pct": "Alts %",
-        }
-        st.dataframe(
-            fin_display[cols_show].rename(columns=rename_map),
-            use_container_width=True, hide_index=True,
-        )
+                fig3.update_yaxes(**_dollar_yaxis(aum_hist["total_assets"]))
+                fig3.update_layout(height=250, margin=dict(l=0, r=0, t=40, b=0))
+                st.plotly_chart(fig3, use_container_width=True)
 
-    if not personnel_df.empty:
-        st.markdown("#### Board & Leadership")
-        p_cols = [c for c in ["name", "title", "role_type", "email", "phone"]
-                  if c in personnel_df.columns]
-        st.dataframe(
-            personnel_df[p_cols].rename(columns={"role_type": "Role"}),
-            use_container_width=True, hide_index=True,
-        )
-    else:
-        st.caption("No personnel data loaded yet for this system.")
+            # Full history table
+            disp = fin_df.copy()
+            for col in ["total_assets", "actuarial_liability", "benefits_paid",
+                        "employer_contributions", "employee_contributions"]:
+                if col in disp.columns:
+                    disp[col] = disp[col].apply(fmt_assets)
+            for col in ["funded_ratio", "investment_return_pct", "return_3yr",
+                        "return_5yr", "return_10yr", "discount_rate"]:
+                if col in disp.columns:
+                    disp[col] = disp[col].apply(fmt_pct)
+            for col in ["active_members", "retired_members"]:
+                if col in disp.columns:
+                    disp[col] = disp[col].apply(
+                        lambda v: f"{int(v):,}" if v and v == v else "—")
+            show_cols = [c for c in [
+                "fiscal_year", "total_assets", "funded_ratio",
+                "investment_return_pct", "return_3yr", "return_5yr", "return_10yr",
+                "discount_rate", "active_members", "retired_members",
+            ] if c in disp.columns]
+            rename = {
+                "fiscal_year": "FY", "total_assets": "Assets",
+                "funded_ratio": "Funded", "investment_return_pct": "1-Yr",
+                "return_3yr": "3-Yr", "return_5yr": "5-Yr", "return_10yr": "10-Yr",
+                "discount_rate": "Discount Rate",
+                "active_members": "Active", "retired_members": "Retired",
+            }
+            st.dataframe(disp[show_cols].rename(columns=rename),
+                         use_container_width=True, hide_index=True)
 
-    # Edit / notes section
-    with st.expander("✏️ Update Notes / Consultant Info"):
+    # ── Allocation tab ─────────────────────────────────────────────────────────
+    with tab_alloc:
+        alloc_row = None
+        for _, row in fin_df.iterrows():
+            alloc_cols = ["equity_pct", "fixed_income_pct", "alternatives_pct",
+                          "real_estate_pct", "cash_pct"]
+            if any(row.get(c) and row.get(c) == row.get(c) for c in alloc_cols):
+                alloc_row = row
+                break
+
+        if alloc_row is None:
+            st.info("No asset allocation data available for this system yet.")
+        else:
+            fy_label = f"FY{int(alloc_row['fiscal_year'])}" if alloc_row.get("fiscal_year") else ""
+            labels, values = [], []
+            for col, lbl in [
+                ("equity_pct", "Equity"),
+                ("fixed_income_pct", "Fixed Income"),
+                ("alternatives_pct", "Alternatives"),
+                ("real_estate_pct", "Real Estate"),
+                ("cash_pct", "Cash"),
+            ]:
+                v = alloc_row.get(col)
+                if v and v == v:
+                    labels.append(lbl)
+                    values.append(v)
+
+            if labels:
+                col_pie, col_tbl = st.columns([1, 1])
+                with col_pie:
+                    fig4 = px.pie(
+                        names=labels, values=values,
+                        title=f"Asset Allocation — {fy_label}",
+                        color_discrete_sequence=px.colors.qualitative.Set2,
+                    )
+                    fig4.update_traces(textposition="inside", textinfo="percent+label")
+                    fig4.update_layout(height=340, showlegend=False,
+                                       margin=dict(l=0, r=0, t=50, b=0))
+                    st.plotly_chart(fig4, use_container_width=True)
+
+                with col_tbl:
+                    st.markdown(f"**Target / Actual Allocation — {fy_label}**")
+                    alloc_tbl = pd.DataFrame({"Asset Class": labels, "Allocation %": values})
+                    alloc_tbl["Allocation %"] = alloc_tbl["Allocation %"].apply(
+                        lambda v: f"{v:.1f}%")
+                    st.dataframe(alloc_tbl, use_container_width=True, hide_index=True)
+
+    # ── Managers tab ───────────────────────────────────────────────────────────
+    with tab_mgr:
+        if mgr_df.empty:
+            st.info("No investment manager data loaded yet for this system.")
+        else:
+            # Returns comparison sub-chart (managers with 1-yr returns vs benchmark)
+            perf_mgrs = mgr_df[mgr_df["return_1yr"].notna()].copy()
+            if not perf_mgrs.empty:
+                fig5 = go.Figure()
+                fig5.add_trace(go.Bar(
+                    name="Manager Return",
+                    x=perf_mgrs["manager_name"],
+                    y=perf_mgrs["return_1yr"],
+                    marker_color="#1f77b4",
+                ))
+                bench_data = perf_mgrs[perf_mgrs["benchmark_return_1yr"].notna()]
+                if not bench_data.empty:
+                    fig5.add_trace(go.Bar(
+                        name="Benchmark",
+                        x=bench_data["manager_name"],
+                        y=bench_data["benchmark_return_1yr"],
+                        marker_color="#aec7e8",
+                    ))
+                fig5.update_layout(
+                    title="Manager vs. Benchmark (1-Yr Return %)",
+                    barmode="group", height=300,
+                    yaxis_ticksuffix="%",
+                    margin=dict(l=0, r=0, t=40, b=0),
+                )
+                st.plotly_chart(fig5, use_container_width=True)
+
+            # Full manager table
+            mgr_show_cols = [c for c in [
+                "manager_name", "asset_class", "strategy",
+                "market_value", "return_1yr", "benchmark_name",
+                "benchmark_return_1yr", "as_of_date", "notes",
+            ] if c in mgr_df.columns]
+            mgr_disp = mgr_df[mgr_show_cols].copy()
+            if "market_value" in mgr_disp.columns:
+                mgr_disp["market_value"] = mgr_disp["market_value"].apply(fmt_assets)
+            for col in ["return_1yr", "benchmark_return_1yr"]:
+                if col in mgr_disp.columns:
+                    mgr_disp[col] = mgr_disp[col].apply(fmt_pct)
+            mgr_rename = {
+                "manager_name": "Manager", "asset_class": "Asset Class",
+                "strategy": "Strategy", "market_value": "AUM",
+                "return_1yr": "1-Yr Return", "benchmark_name": "Benchmark",
+                "benchmark_return_1yr": "Bench Return",
+                "as_of_date": "As Of", "notes": "Notes",
+            }
+            st.dataframe(mgr_disp.rename(columns=mgr_rename),
+                         use_container_width=True, hide_index=True)
+
+    # ── Leadership tab ─────────────────────────────────────────────────────────
+    with tab_board:
+        if personnel_df.empty:
+            st.info("No personnel data loaded yet for this system.")
+        else:
+            p_cols = [c for c in ["name", "title", "role_type", "email", "phone"]
+                      if c in personnel_df.columns]
+            st.dataframe(personnel_df[p_cols].rename(columns={"role_type": "Role"}),
+                         use_container_width=True, hide_index=True)
+
+    # ── Edit tab ───────────────────────────────────────────────────────────────
+    with tab_edit:
         new_consultant = st.text_input(
-            "Investment Consultant", value=sys_row.get("investment_consultant") or ""
-        )
+            "Investment Consultant", value=sys_row.get("investment_consultant") or "")
         new_cio = st.text_input("CIO", value=sys_row.get("cio") or "")
         new_director = st.text_input(
-            "Executive Director", value=sys_row.get("executive_director") or ""
-        )
+            "Executive Director", value=sys_row.get("executive_director") or "")
+        new_actuary = st.text_input("Actuary", value=sys_row.get("actuary") or "")
+        new_custodian = st.text_input("Custodian", value=sys_row.get("custodian") or "")
+        new_website = st.text_input("Website", value=sys_row.get("website") or "")
+        new_phone = st.text_input("Phone", value=sys_row.get("phone") or "")
         new_notes = st.text_area("Notes", value=sys_row.get("notes") or "")
         if st.button("💾 Save Changes", key="rs_save"):
             try:
@@ -1754,10 +1883,13 @@ def show_retirement_systems(crm):
                     conn.execute(
                         """UPDATE retirement_systems
                            SET investment_consultant=?, cio=?, executive_director=?,
+                               actuary=?, custodian=?, website=?, phone=?,
                                notes=?, updated_at=CURRENT_TIMESTAMP
                            WHERE id=?""",
                         [new_consultant or None, new_cio or None,
-                         new_director or None, new_notes or None, sys_id],
+                         new_director or None, new_actuary or None,
+                         new_custodian or None, new_website or None,
+                         new_phone or None, new_notes or None, sys_id],
                     )
                     conn.commit()
                 st.success("Saved.")
