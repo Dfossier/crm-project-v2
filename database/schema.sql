@@ -135,6 +135,7 @@ CREATE INDEX idx_foundations_name ON foundations(name);
 CREATE INDEX idx_financial_year ON financial_history(filing_year);
 CREATE INDEX idx_grants_amount ON grants(grant_amount);
 CREATE INDEX idx_interactions_date ON interactions(interaction_date);
+CREATE UNIQUE INDEX idx_personnel_990_unique ON personnel_990 (foundation_id, name, title, role_type, filing_year);
 
 -- Create views for common queries
 CREATE VIEW foundations_summary AS
