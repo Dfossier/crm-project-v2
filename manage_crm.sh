@@ -6,7 +6,7 @@
 CRM_DIR="$(dirname "$0")"
 PID_FILE="$CRM_DIR/crm.pid"
 LOG_FILE="$CRM_DIR/streamlit.log"
-PORT=8506
+PORT=8888
 
 cd "$CRM_DIR"
 

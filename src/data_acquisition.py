@@ -137,10 +137,15 @@ class DataAcquisition:
             url = f"{self.propublica_api_base}/organizations/{ein}.json"
             response = self.session.get(url, timeout=30)
             response.raise_for_status()
-            
+
             data = response.json()
-            return data.get('organization', {})
-            
+            # Return the full response which includes both 'organization' and 'filings_with_data'
+            # Merge them into a single dict for backwards compatibility
+            org = data.get('organization', {})
+            org['filings_with_data'] = data.get('filings_with_data', [])
+            org['filings'] = data.get('filings', [])  # Keep for backwards compatibility
+            return org
+
         except requests.RequestException as e:
             logger.error(f"Error fetching details for EIN {ein}: {e}")
             return None
@@ -148,42 +153,55 @@ class DataAcquisition:
     def extract_foundation_data(self, org_data: Dict) -> Optional[Dict]:
         """Extract and structure foundation data from API response."""
         try:
-            # Get the most recent filing
-            filings = org_data.get('filings', [])
+            # Get the most recent filing - API now uses 'filings_with_data'
+            filings = org_data.get('filings_with_data', [])
+            if not filings:
+                # Fallback to old 'filings' key if available
+                filings = org_data.get('filings', [])
+
             if not filings:
                 return None
-            
-            latest_filing = filings[0]  # Filings are usually sorted by year descending
-            
+
+            # Find the latest filing by tax year (don't assume sorted)
+            latest_filing = max(filings, key=lambda x: x.get('tax_prd_yr', 0))
+
             # Extract basic information
             foundation = {
-                'ein': org_data.get('ein'),
+                'ein': str(org_data.get('ein')),
                 'name': org_data.get('name'),
                 'legal_name': org_data.get('name'),  # May need to extract from filings
                 'city': org_data.get('city'),
                 'state': org_data.get('state'),
                 'zip_code': org_data.get('zipcode'),
                 'website': None,  # Not always available in API
-                'tax_exempt_status': org_data.get('classification', {}).get('classification_code'),
+                'tax_exempt_status': org_data.get('classification_codes'),
                 'ruling_date': org_data.get('ruling_date')
             }
-            
+
             # Extract financial data from latest filing
             if 'totrevenue' in latest_filing:
+                total_assets = latest_filing.get('totassetsend', 0)
+                net_assets = latest_filing.get('totnetassetend', 0)
+
+                # Use net assets as proxy for investment assets if totsecuritiesend is not available
+                # For community foundations, net assets are typically heavily invested
+                investment_assets = latest_filing.get('totsecuritiesend') or net_assets * 0.9  # Conservative estimate
+
                 foundation.update({
-                    'total_assets': latest_filing.get('totassetsend'),
-                    'investment_assets': latest_filing.get('totsecuritiesend', 0),  # Securities as proxy for investments
+                    'total_assets': total_assets,
+                    'investment_assets': investment_assets,
                     'annual_revenue': latest_filing.get('totrevenue'),
                     'annual_grants': latest_filing.get('totgrantspaid', 0),
                     'filing_year': latest_filing.get('tax_prd_yr')
                 })
-            
-            # Only return if investment assets meet our threshold
-            if foundation.get('investment_assets', 0) >= 2000000:
+
+            # Only return if total assets meet our threshold (changed from investment_assets)
+            # This ensures we capture all substantial foundations
+            if foundation.get('total_assets', 0) >= 2000000:
                 return foundation
-            
+
             return None
-            
+
         except Exception as e:
             logger.error(f"Error extracting foundation data: {e}")
             return None

@@ -240,7 +240,20 @@ def llm_extract_bio(page_text: str, person_name: str, source_url: str = "") -> s
         )
         r.raise_for_status()
         result = r.json()["choices"][0]["message"]["content"].strip()
-        if result == "NO_BIO" or len(result) < 40:
+        if len(result) < 40:
+            return None
+        # Detect when the LLM signals no usable info (strict or verbose)
+        no_info_signals = (
+            "NO_BIO",
+            "no meaningful information",
+            "does not contain",
+            "no relevant details",
+            "no information about",
+            "cannot find",
+            "not mentioned",
+        )
+        lower = result.lower()
+        if any(s.lower() in lower for s in no_info_signals):
             return None
         return result
     except Exception as e:
