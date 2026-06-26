@@ -128,6 +128,73 @@ CREATE TABLE data_sources (
     FOREIGN KEY (foundation_id) REFERENCES foundations(id)
 );
 
+-- ─── Louisiana State Retirement Systems ───────────────────────────────────────
+
+CREATE TABLE retirement_systems (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    abbreviation TEXT,
+    system_type TEXT,          -- 'statewide', 'parochial', 'municipal', 'specialty'
+    website TEXT,
+    phone TEXT,
+    address TEXT,
+    city TEXT DEFAULT 'Baton Rouge',
+    state TEXT DEFAULT 'LA',
+    zip_code TEXT,
+    executive_director TEXT,
+    cio TEXT,
+    investment_consultant TEXT,
+    actuary TEXT,
+    custodian TEXT,
+    total_assets REAL,         -- most recent, in dollars
+    funded_ratio REAL,         -- 0–100 pct
+    active_members INTEGER,
+    retired_members INTEGER,
+    asset_data_year INTEGER,   -- fiscal year for total_assets
+    fiscal_year_end TEXT,      -- e.g. 'June 30'
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE system_financials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    system_id INTEGER NOT NULL,
+    fiscal_year INTEGER NOT NULL,
+    total_assets REAL,
+    actuarial_liability REAL,
+    funded_ratio REAL,
+    employer_contributions REAL,
+    employee_contributions REAL,
+    investment_return_pct REAL,
+    benefits_paid REAL,
+    active_members INTEGER,
+    retired_members INTEGER,
+    equity_pct REAL,
+    fixed_income_pct REAL,
+    alternatives_pct REAL,
+    real_estate_pct REAL,
+    cash_pct REAL,
+    FOREIGN KEY (system_id) REFERENCES retirement_systems(id),
+    UNIQUE (system_id, fiscal_year)
+);
+
+CREATE TABLE system_personnel (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    system_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    title TEXT,
+    role_type TEXT,            -- 'executive', 'board', 'investment_committee'
+    is_executive_director BOOLEAN DEFAULT 0,
+    is_cio BOOLEAN DEFAULT 0,
+    is_board_chair BOOLEAN DEFAULT 0,
+    phone TEXT,
+    email TEXT,
+    notes TEXT,
+    FOREIGN KEY (system_id) REFERENCES retirement_systems(id),
+    UNIQUE (system_id, name, title)
+);
+
 -- Create indexes for performance
 CREATE INDEX idx_foundations_ein ON foundations(ein);
 CREATE INDEX idx_foundations_assets ON foundations(investment_assets);

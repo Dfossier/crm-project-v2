@@ -839,7 +839,7 @@ def main():
     st.sidebar.title("🏛️ Louisiana Foundations CRM")
     _pages = ["Dashboard", "Foundation Directory", "Foundation Details", "Follow-ups",
               "Compliance", "Centers of Influence", "Add Interaction", "Data Management",
-              "📊 Financial Comparison"]
+              "📊 Financial Comparison", "🏦 State Retirement Systems"]
     if '_sidebar_nav' not in st.session_state:
         st.session_state._sidebar_nav = 'Dashboard'
     page = st.sidebar.selectbox("Navigate", _pages, key='_sidebar_nav')
@@ -862,6 +862,8 @@ def main():
         show_data_management(crm)
     elif page == "📊 Financial Comparison":
         show_financial_comparison(crm)
+    elif page == "🏦 State Retirement Systems":
+        show_retirement_systems(crm)
 
 def show_dashboard(crm):
     """Display the main dashboard with summary statistics."""
@@ -1523,6 +1525,246 @@ def show_data_management(crm):
         
         except Exception as e:
             st.error(f"Error loading database stats: {e}")
+
+def show_retirement_systems(crm):
+    """State Retirement Systems directory and detail view."""
+    st.title("🏦 Louisiana State Retirement Systems")
+
+    try:
+        with crm.get_connection() as conn:
+            systems_df = pd.read_sql_query(
+                "SELECT * FROM retirement_systems ORDER BY total_assets DESC NULLS LAST",
+                conn,
+            )
+    except Exception as e:
+        st.error(f"Error loading retirement systems: {e}")
+        return
+
+    if systems_df.empty:
+        st.info("No retirement systems found. Run migrate_add_retirement_systems.py to seed data.")
+        return
+
+    # ── Summary table ──────────────────────────────────────────────────────────
+    def fmt_assets(v):
+        if v is None or (isinstance(v, float) and v != v):
+            return "—"
+        if v >= 1e9:
+            return f"${v/1e9:.1f}B"
+        return f"${v/1e6:.0f}M"
+
+    def fmt_pct(v):
+        if v is None or (isinstance(v, float) and v != v):
+            return "—"
+        return f"{v:.1f}%"
+
+    summary = systems_df[[
+        "abbreviation", "name", "system_type",
+        "total_assets", "asset_data_year", "funded_ratio",
+        "active_members", "retired_members",
+        "investment_consultant", "executive_director",
+    ]].copy()
+    summary["AUM"] = summary["total_assets"].apply(fmt_assets)
+    summary["Funded"] = summary["funded_ratio"].apply(fmt_pct)
+    summary["Active"] = summary["active_members"].apply(
+        lambda v: f"{int(v):,}" if v and v == v else "—"
+    )
+    summary["Retired"] = summary["retired_members"].apply(
+        lambda v: f"{int(v):,}" if v and v == v else "—"
+    )
+    summary["FY"] = summary["asset_data_year"].apply(
+        lambda v: str(int(v)) if v and v == v else "—"
+    )
+    summary["Type"] = summary["system_type"].str.title()
+    summary["Consultant"] = summary["investment_consultant"].fillna("—")
+    summary["Director"] = summary["executive_director"].fillna("—")
+
+    display_cols = {
+        "abbreviation": "Abbrev.",
+        "name": "System Name",
+        "Type": "Type",
+        "AUM": "Total Assets",
+        "FY": "As Of",
+        "Funded": "Funded Ratio",
+        "Active": "Active Members",
+        "Consultant": "Inv. Consultant",
+        "Director": "Exec. Director",
+    }
+    table_df = summary.rename(columns={"abbreviation": "Abbrev.", "name": "System Name"})[
+        list(display_cols.values())
+    ]
+
+    st.markdown("### All Systems")
+    sel = st.dataframe(
+        table_df,
+        use_container_width=True,
+        hide_index=True,
+        selection_mode="single-row",
+        on_select="rerun",
+        key="rs_summary_table",
+    )
+
+    # ── Quick-stat bar ─────────────────────────────────────────────────────────
+    known_aum = systems_df["total_assets"].dropna()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Systems Tracked", len(systems_df))
+    c2.metric("Known AUM", fmt_assets(known_aum.sum()) if len(known_aum) else "—")
+    c3.metric("Systems with AUM Data", int(known_aum.count()))
+
+    # ── AUM bar chart ──────────────────────────────────────────────────────────
+    chart_df = systems_df[systems_df["total_assets"].notna()].copy()
+    chart_df = chart_df.sort_values("total_assets", ascending=True)
+    if not chart_df.empty:
+        fig = px.bar(
+            chart_df,
+            x="total_assets",
+            y="abbreviation",
+            orientation="h",
+            color="system_type",
+            title="Total Assets by System",
+            labels={"total_assets": "Total Assets", "abbreviation": ""},
+            color_discrete_map={
+                "statewide": "#1f77b4",
+                "parochial": "#ff7f0e",
+                "municipal": "#2ca02c",
+                "specialty": "#9467bd",
+            },
+        )
+        fig.update_xaxes(**_dollar_yaxis(chart_df["total_assets"]))
+        fig.update_layout(height=350, showlegend=True, legend_title="Type",
+                          margin=dict(l=0, r=10, t=40, b=0))
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── Detail panel for selected row ─────────────────────────────────────────
+    selected_rows = sel.selection.rows
+    if not selected_rows:
+        st.info("Select a row above to see system details.")
+        return
+
+    sys_row = systems_df.iloc[selected_rows[0]]
+    sys_id = int(sys_row["id"])
+
+    st.divider()
+    st.subheader(f"📋 {sys_row['name']} ({sys_row['abbreviation']})")
+
+    # Basic info
+    info_col, fin_col = st.columns([1, 1])
+    with info_col:
+        st.markdown("**Organization**")
+        fields = [
+            ("Type", sys_row.get("system_type", "").title()),
+            ("Website", f"[{sys_row['website']}]({sys_row['website']})" if sys_row.get("website") else "—"),
+            ("Phone", sys_row.get("phone") or "—"),
+            ("City", sys_row.get("city") or "—"),
+            ("Fiscal Year End", sys_row.get("fiscal_year_end") or "—"),
+        ]
+        for label, val in fields:
+            st.markdown(f"**{label}:** {val}")
+
+    with fin_col:
+        st.markdown("**Investment / Financial**")
+        fields2 = [
+            ("Total Assets", fmt_assets(sys_row.get("total_assets"))),
+            ("Funded Ratio", fmt_pct(sys_row.get("funded_ratio"))),
+            ("Inv. Consultant", sys_row.get("investment_consultant") or "—"),
+            ("Actuary", sys_row.get("actuary") or "—"),
+            ("Custodian", sys_row.get("custodian") or "—"),
+            ("CIO", sys_row.get("cio") or "—"),
+        ]
+        for label, val in fields2:
+            st.markdown(f"**{label}:** {val}")
+
+    if sys_row.get("notes"):
+        st.caption(sys_row["notes"])
+
+    # Financial history
+    try:
+        with crm.get_connection() as conn:
+            fin_df = pd.read_sql_query(
+                "SELECT * FROM system_financials WHERE system_id = ? ORDER BY fiscal_year DESC",
+                conn,
+                params=[sys_id],
+            )
+            personnel_df = pd.read_sql_query(
+                "SELECT * FROM system_personnel WHERE system_id = ? ORDER BY role_type, name",
+                conn,
+                params=[sys_id],
+            )
+    except Exception as e:
+        st.error(f"Error loading details: {e}")
+        return
+
+    if not fin_df.empty:
+        st.markdown("#### Financial History")
+        fin_display = fin_df.copy()
+        for col in ["total_assets", "actuarial_liability", "employer_contributions",
+                    "employee_contributions", "benefits_paid"]:
+            if col in fin_display.columns:
+                fin_display[col] = fin_display[col].apply(fmt_assets)
+        for col in ["funded_ratio", "investment_return_pct",
+                    "equity_pct", "fixed_income_pct", "alternatives_pct",
+                    "real_estate_pct", "cash_pct"]:
+            if col in fin_display.columns:
+                fin_display[col] = fin_display[col].apply(fmt_pct)
+        for col in ["active_members", "retired_members"]:
+            if col in fin_display.columns:
+                fin_display[col] = fin_display[col].apply(
+                    lambda v: f"{int(v):,}" if v and v == v else "—"
+                )
+        cols_show = [c for c in [
+            "fiscal_year", "total_assets", "funded_ratio", "investment_return_pct",
+            "active_members", "retired_members",
+            "equity_pct", "fixed_income_pct", "alternatives_pct",
+        ] if c in fin_display.columns]
+        rename_map = {
+            "fiscal_year": "Fiscal Year", "total_assets": "Total Assets",
+            "funded_ratio": "Funded %", "investment_return_pct": "Return %",
+            "active_members": "Active", "retired_members": "Retired",
+            "equity_pct": "Equity %", "fixed_income_pct": "Fixed Inc %",
+            "alternatives_pct": "Alts %",
+        }
+        st.dataframe(
+            fin_display[cols_show].rename(columns=rename_map),
+            use_container_width=True, hide_index=True,
+        )
+
+    if not personnel_df.empty:
+        st.markdown("#### Board & Leadership")
+        p_cols = [c for c in ["name", "title", "role_type", "email", "phone"]
+                  if c in personnel_df.columns]
+        st.dataframe(
+            personnel_df[p_cols].rename(columns={"role_type": "Role"}),
+            use_container_width=True, hide_index=True,
+        )
+    else:
+        st.caption("No personnel data loaded yet for this system.")
+
+    # Edit / notes section
+    with st.expander("✏️ Update Notes / Consultant Info"):
+        new_consultant = st.text_input(
+            "Investment Consultant", value=sys_row.get("investment_consultant") or ""
+        )
+        new_cio = st.text_input("CIO", value=sys_row.get("cio") or "")
+        new_director = st.text_input(
+            "Executive Director", value=sys_row.get("executive_director") or ""
+        )
+        new_notes = st.text_area("Notes", value=sys_row.get("notes") or "")
+        if st.button("💾 Save Changes", key="rs_save"):
+            try:
+                with crm.get_connection() as conn:
+                    conn.execute(
+                        """UPDATE retirement_systems
+                           SET investment_consultant=?, cio=?, executive_director=?,
+                               notes=?, updated_at=CURRENT_TIMESTAMP
+                           WHERE id=?""",
+                        [new_consultant or None, new_cio or None,
+                         new_director or None, new_notes or None, sys_id],
+                    )
+                    conn.commit()
+                st.success("Saved.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Save failed: {e}")
+
 
 if __name__ == "__main__":
     main()
