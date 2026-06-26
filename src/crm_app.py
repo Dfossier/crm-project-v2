@@ -144,11 +144,16 @@ class FoundationCRM:
             except Exception:
                 advisors_df = pd.DataFrame()
             
-            # Detailed 990 personnel data
+            # Detailed 990 personnel data — most recent filing year only
             personnel_990_query = """
-                SELECT * FROM personnel_990 WHERE foundation_id = ?
-                ORDER BY 
-                    CASE 
+                SELECT * FROM personnel_990
+                WHERE foundation_id = ?
+                  AND filing_year = (
+                      SELECT MAX(filing_year) FROM personnel_990
+                      WHERE foundation_id = ?
+                  )
+                ORDER BY
+                    CASE
                         WHEN is_president = 1 OR is_ceo = 1 THEN 1
                         WHEN is_cfo = 1 THEN 2
                         WHEN is_vice_president = 1 THEN 3
@@ -160,7 +165,7 @@ class FoundationCRM:
                     compensation DESC
             """
             try:
-                personnel_990_df = pd.read_sql_query(personnel_990_query, conn, params=[foundation_id])
+                personnel_990_df = pd.read_sql_query(personnel_990_query, conn, params=[foundation_id, foundation_id])
             except Exception:
                 personnel_990_df = pd.DataFrame()
             
